@@ -150,6 +150,25 @@ After generating the improved version, do a self-check:
 
 If any check fails, note it and adjust.
 
+### Step 7 — Save the Improved Prompt
+
+**After delivering the audit and improved version, always offer to save.**
+
+**If the original prompt came from a file** (e.g., `/review-prompt @path/to/prompt.md`):
+- Ask: "Save the improved version? Options:
+  1. **Overwrite** the original file (`[original path]`)
+  2. **Save as new file** (I'll ask for the path)
+  3. **Don't save** (you can copy from the code block above)"
+
+**If the original prompt was pasted inline:**
+- Ask: "Where should I save the improved prompt? Provide a file path, or say 'don't save' if you'll copy it manually."
+
+**After user responds:**
+- If saving: Write the improved prompt to the specified path using the Write tool. Confirm: "Saved to `[path]`"
+- If not saving: Acknowledge and end.
+
+**Do not skip this step.** The improved version is only useful if it's saved somewhere the user can actually use it.
+
 ---
 
 ## OUTPUT
