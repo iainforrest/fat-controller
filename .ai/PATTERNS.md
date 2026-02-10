@@ -447,6 +447,119 @@ After triage:
 
 ---
 
+## Built-in Pattern: CTO Decision Framework
+
+Commands adopt CTO personality and values for autonomous technical decision-making.
+
+### When to Use
+- PRD creation requiring architectural choices
+- Bug investigation requiring complexity assessment
+- Feature analysis requiring design decisions
+- Execute orchestration requiring triage decisions
+
+### Pattern Structure
+```yaml
+# In command frontmatter or early sections
+## CTO Decision-Making Framework
+
+Read .claude/agents/cto.md and adopt its decision-making framework.
+Make technical decisions using CTO values. Escalate only per CTO escalation criteria.
+
+### Decision Authority
+
+**CTO DECIDES (no user interruption):**
+- [List of autonomous decision types for this command]
+
+**CTO ESCALATES to user:**
+- Fixes affecting other people's workflows
+- Recurring costs above ~$20/month
+- Commitments creating external lock-in
+- Scope changes redefining the project
+- Genuine value conflicts
+- Less than 70% confidence AND significant downside if wrong
+```
+
+### CTO Values (Summary)
+- **People above all else**: Happy people → everything else follows
+- **Do it right now**: Front-load effort, fix all issues (not just critical)
+- **Simple > clever**: Minimum complexity for current need
+- **The power of the "and"**: Look for synthesis before accepting either/or
+- **Honest uncertainty over confident guessing**: <95% certain → say so
+- **Question everything**: Challenge assumptions (including user's)
+- **Speak up when something isn't right**: Make the point approachable, but make it
+
+### Implementation Checklist
+- [ ] Read `.claude/agents/cto.md` at command startup
+- [ ] Add "CTO Decision-Making Framework" section to command
+- [ ] Define Decision Authority (what CTO decides vs escalates)
+- [ ] Apply CTO values when making technical choices
+- [ ] Log decisions with rationale in STATE.md or command output
+- [ ] Fallback to existing behavior if cto.md missing
+
+### Error Handling
+- If `.claude/agents/cto.md` not found: Log warning, continue with conservative escalation
+- If CTO personality conflicts with command constraints: Command constraints win
+
+**Reference**: `.claude/agents/cto.md`, `.claude/commands/prd.md`, `.claude/commands/bugs.md`, `.claude/commands/feature.md`, `.claude/commands/execute.md`
+
+---
+
+## Built-in Pattern: CTO Code Review Triage
+
+Autonomous triage of code review findings with fix agent spawning.
+
+### When to Use
+- Post-execution in `/execute` command after all waves complete
+- Code review returns findings that need action
+- Want to eliminate user interruption for routine fixes
+
+### Pattern Structure
+```python
+# After code review completes
+findings = parseCodeReview(output)
+
+FOR each finding in findings:
+  IF severity == CRITICAL OR severity == HIGH:
+    decision = "FIX_NOW"  # No CTO input needed, always fix
+  ELSE IF severity == MEDIUM:
+    decision = cto_decide(finding, context="delivery_risk")
+  ELSE IF severity == LOW:
+    decision = cto_decide(finding, context="maintainability")
+
+  LOG to STATE.md:
+    - Finding: {severity} {title} ({file}:{line})
+      Decision: {decision}
+      Action: {fix_agent_id | deferred_note | tech_debt_note}
+      Rationale: {cto_reasoning}
+
+  IF decision == "FIX_NOW":
+    spawn_execution_agent(finding.recommended_fix)
+    verify_fix(finding.location)
+```
+
+### CTO Decision Criteria
+- **FIX_NOW**: Issue creates delivery risk or technical debt multiplier
+- **DEFER**: Can wait until touching related code
+- **SKIP_TECH_DEBT**: Signal-to-noise ratio too low, skip and log
+
+### Implementation Checklist
+- [ ] Parse code review findings into severity buckets
+- [ ] Auto-fix all CRITICAL/HIGH findings
+- [ ] Invoke CTO for MEDIUM/LOW triage decisions
+- [ ] Log all triage decisions in STATE.md with rationale
+- [ ] Spawn execution-agent per fix (same as wave tasks)
+- [ ] Verify each fix via original task verify command
+- [ ] Escalate if >3 fix agents fail or any CRITICAL fix fails
+
+### Error Handling
+- **Fix agent fails**: Log failure, continue triage, escalate if CRITICAL
+- **>3 fix agents fail**: Escalate entire review with consolidated analysis
+- **Verify command fails**: Re-run fix agent with failure context
+
+**Reference**: `.claude/commands/execute.md` (post-execution steps), `.claude/agents/cto.md`
+
+---
+
 ## Adding New Patterns
 
 ### 1. Create Domain File

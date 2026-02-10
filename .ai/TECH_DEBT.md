@@ -38,7 +38,23 @@ This file captures:
 
 ### MEDIUM Severity
 
-_No MEDIUM items currently tracked._
+#### [TD-004] pull-fc: CTO agent sync missing
+
+**Severity**: MEDIUM
+
+**Location**: `.claude/commands/pull-fc.md`
+
+**Description**: pull-fc command syncs `.claude/commands/` and `.claude/agents/` but does not explicitly list `.claude/agents/cto.md` in its documentation or validation. Since cto.md is now a mandatory dependency for prd/bugs/feature/execute commands, it should be included in the sync list.
+
+**Why Deferred**: Current sync behavior already covers `.claude/agents/` glob, so cto.md is synced. This is a documentation gap, not a functional gap.
+
+**Impact**: User confusion if they manually check what pull-fc syncs.
+
+**Suggested Fix**: Add `.claude/agents/cto.md` to the explicit file list in pull-fc documentation, or add a validation step confirming cto.md exists after sync.
+
+**Added**: 2026-02-10
+
+**Source**: CR-CTO-integration (Code review finding from commits 7581f6f-977d85c)
 
 ---
 
@@ -104,6 +120,46 @@ _No MEDIUM items currently tracked._
 
 ---
 
+#### [TD-005] execute.md: Ambiguous 1-2 non-CRITICAL fix failure handling
+
+**Severity**: LOW
+
+**Location**: `.claude/commands/execute.md` (post-execution code review triage section)
+
+**Description**: When 1-2 non-CRITICAL fix agents fail, the error handling description says "continue triage" but doesn't specify whether to skip those failed fixes or retry them. This could lead to inconsistent behavior.
+
+**Why Deferred**: In practice, the CTO would make a judgment call based on the specific failure. The ambiguity reflects real-world complexity rather than a specification error.
+
+**Impact**: Minimal - orchestrator will make reasonable decisions, but explicit guidance would improve consistency.
+
+**Suggested Fix**: Add explicit guidance: "For 1-2 non-CRITICAL failures, log the failure, continue triage, and add the failed fix to TECH_DEBT.md with the failure reason."
+
+**Added**: 2026-02-10
+
+**Source**: CR-CTO-integration (Code review finding CR-007 from commits 7581f6f-977d85c)
+
+---
+
+#### [TD-006] execute.md: Escalation criteria duplication
+
+**Severity**: LOW
+
+**Location**: `.claude/commands/prd.md`, `.claude/commands/bugs.md`, `.claude/commands/feature.md`, `.claude/commands/execute.md`
+
+**Description**: CTO escalation criteria (recurring costs >$20/month, external lock-in, people impact, value conflicts, scope changes, <70% confidence with significant downside) are duplicated across four command files. If criteria change, all four files need manual updates.
+
+**Why Deferred**: Duplication ensures each command is self-contained and understandable without cross-references. The escalation criteria are stable and unlikely to change frequently.
+
+**Impact**: Maintenance burden if escalation criteria evolve.
+
+**Suggested Fix**: Extract escalation criteria to `.claude/agents/cto.md` and reference from commands, or accept duplication as the trade-off for self-contained documentation.
+
+**Added**: 2026-02-10
+
+**Source**: CR-CTO-integration (Code review finding CR-005 from commits 7581f6f-977d85c)
+
+---
+
 ## Refactoring Opportunities
 
 ### [RO-001] [Refactoring Name]
@@ -149,6 +205,9 @@ _No MEDIUM items currently tracked._
 | TD-001 | Issue | LOW | prd.md | 2026-02-04 | Open |
 | TD-002 | Issue | LOW | prd.md | 2026-02-04 | Open |
 | TD-003 | Issue | LOW | prd.md | 2026-02-04 | Open |
+| TD-004 | Issue | MEDIUM | pull-fc.md | 2026-02-10 | Open |
+| TD-005 | Issue | LOW | execute.md | 2026-02-10 | Open |
+| TD-006 | Issue | LOW | commands/ | 2026-02-10 | Open |
 
 ---
 

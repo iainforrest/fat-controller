@@ -9,21 +9,29 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
-- Dual-model code review with parallel Claude (Opus) and Codex execution
-- Finding merge and deduplication algorithm (hash-based matching)
-- Convergent finding indicators (source: both, confidence: convergent)
-- Single-model finding attribution (source: claude|codex, confidence: single-model)
-- User triage loop for MEDIUM/LOW findings with 3 options (fix now, tech debt, skip)
-- Source attribution in TECH_DEBT.md entries (Claude only|Codex only|Both)
-- JSON output schema for code-review-agent standardized across models
-- --codex-only flag for legacy single-model code review mode
-- Codex failure fallback to Claude-only mode
+- CTO agent file (.claude/agents/cto.md) with values-driven decision framework
+- CTO Decision-Making Framework sections in prd.md, bugs.md, feature.md, execute.md
+- Decision Authority sections defining what CTO decides vs escalates in each command
+- Autonomous code review triage by CTO-orchestrator (no user interruption for fixes)
+- CTO-advisor task completion review as post-execution validation step
+- 9-step post-execution flow: code review → CTO triage → fix agents → verification → CTO-advisor → memory update → archive
+- Dual-mode output for cto-technical-advisor (Mode A: briefing, Mode B: full advisory)
+- STATE.md audit trail for all CTO triage decisions
+- CTO Personality Overlay pattern in PATTERNS.md
+- CTO Code Review Triage pattern in PATTERNS.md
 
 ### Changed
-- /code-review command now defaults to dual-model mode (Claude + Codex parallel)
-- Code review agent outputs standardized JSON for consistent merging
-- TECH_DEBT.md template updated with Source field for model attribution
-- Task-writer code review checkpoint updated to reference dual-model orchestration
+- Execute command now uses Codex 5.3 (gpt-5.3-codex) for all complexity levels
+- Model selection: Codex 5.3 medium for complexity 1-3, xhigh for complexity 4-5
+- Eliminated Sonnet tier (replaced with Codex 5.3 medium)
+- Codex 5.3 provides 50% token reduction and 25% faster execution vs prior versions
+- Commands (prd, bugs, feature, execute) now read cto.md at startup and adopt CTO decision framework
+- cto-technical-advisor agent updated with dual-mode output and Relationship to CTO section
+
+### Fixed
+- TD-004: pull-fc command missing explicit cto.md sync validation (deferred to TECH_DEBT.md)
+- TD-005: execute.md ambiguous 1-2 non-CRITICAL fix failure handling (deferred to TECH_DEBT.md)
+- TD-006: Escalation criteria duplication across commands (deferred to TECH_DEBT.md)
 
 ---
 
