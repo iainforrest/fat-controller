@@ -167,7 +167,7 @@ function printNextSteps(setupType) {
   console.log();
 
   log('For help and documentation:', 'yellow');
-  log('  https://github.com/iainforrest/claude-project-starter', 'yellow');
+  log('  https://github.com/iainforrest/fat-controller', 'yellow');
   console.log('\n');
 }
 

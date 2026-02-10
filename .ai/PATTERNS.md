@@ -58,7 +58,7 @@ Find the right pattern for your task:
 
 ## Built-in Pattern: Command-Agent Delegation
 
-This pattern is core to the claude-project-starter workflow.
+This pattern is core to the fat-controller workflow.
 
 ### When to Use
 - Heavy document generation (PRDs, task lists)

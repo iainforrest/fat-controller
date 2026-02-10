@@ -44,7 +44,7 @@ For EVERY parent task, spawn execution based on complexity:
 ```
 Task(
   subagent_type: "execution-agent",
-  model: "sonnet",  // For complexity 3 only; use Codex (medium) for 1-2, Codex (xhigh) for 4-5
+  model: "codex",  // All complexities use Codex 5.3 (medium for 1-3, xhigh for 4-5)
   prompt: """
 ---
 parent_task:
@@ -430,7 +430,7 @@ selectModel(complexity):
   IF complexity >= 4:
     RETURN "codex-xhigh"
   ELSE IF complexity == 3:
-    RETURN "sonnet"
+    RETURN "codex-medium"
   ELSE:
     RETURN "codex"
 ```
@@ -439,11 +439,11 @@ selectModel(complexity):
 
 | Complexity | Model | Rationale |
 |------------|-------|-----------|
-| 1/5 | **codex** (gpt-5.2-codex, medium reasoning) | Simple task, Codex capable, saves Claude tokens |
-| 2/5 | **codex** (gpt-5.2-codex, medium reasoning) | Standard task, Codex capable, saves Claude tokens |
-| 3/5 | sonnet | Moderate task, needs Claude reasoning |
-| 4/5 | **codex-xhigh** (gpt-5.2-codex, xhigh reasoning) | Complex task, needs deep reasoning |
-| 5/5 | **codex-xhigh** (gpt-5.2-codex, xhigh reasoning) | System-wide task, needs strongest model |
+| 1/5 | **codex** (gpt-5.3-codex, medium reasoning) | Simple task, Codex 5.3 efficient execution |
+| 2/5 | **codex** (gpt-5.3-codex, medium reasoning) | Standard task, Codex 5.3 efficient execution |
+| 3/5 | **codex-medium** (gpt-5.3-codex, medium reasoning) | Moderate task, Codex 5.3 balanced reasoning |
+| 4/5 | **codex-xhigh** (gpt-5.3-codex, xhigh reasoning) | Complex task, Codex 5.3 deep reasoning |
+| 5/5 | **codex-xhigh** (gpt-5.3-codex, xhigh reasoning) | System-wide task, Codex 5.3 strongest mode |
 
 ### Logging
 
@@ -453,23 +453,23 @@ Parent Task {id} (complexity {n}/5) → using {model} via {method}
 ```
 
 Examples:
-- `Parent Task 1.0 (complexity 2/5) → using codex (gpt-5.2-codex, medium) via Bash`
-- `Parent Task 2.0 (complexity 3/5) → using sonnet via Task tool`
-- `Parent Task 3.0 (complexity 4/5) → using codex-xhigh (gpt-5.2-codex, xhigh) via Bash`
+- `Parent Task 1.0 (complexity 2/5) → using codex (gpt-5.3-codex, medium) via Bash`
+- `Parent Task 2.0 (complexity 3/5) → using codex-medium (gpt-5.3-codex, medium) via Bash`
+- `Parent Task 3.0 (complexity 4/5) → using codex-xhigh (gpt-5.3-codex, xhigh) via Bash`
 
 ### Cost Rationale
 
-Codex uses separate OpenAI token allocation, freeing Claude tokens for other work. The three-tier routing ensures:
-- Codex (gpt-5.2-codex, medium reasoning) handles simple tasks (1-2), saving Claude tokens
-- Sonnet handles moderate tasks (3), balancing cost and capability
-- Codex (gpt-5.2-codex, xhigh reasoning) handles complex tasks (4-5), providing deep reasoning
+Codex 5.3 uses fewer tokens for equivalent tasks (<50% of prior versions) and is 25% faster. All complexity levels now use Codex 5.3 with varying reasoning effort:
+- Codex (gpt-5.3-codex, medium reasoning) handles simple tasks (1-2)
+- Codex (gpt-5.3-codex, medium reasoning) handles moderate tasks (3)
+- Codex (gpt-5.3-codex, xhigh reasoning) handles complex tasks (4-5), providing deep reasoning
 
 ### Spawning by Model Type
 
-**For Codex (complexity 1-2):** Use Bash with `codex exec`
+**For Codex (complexity 1-2):** Use Bash with `codex -m gpt-5.3-codex exec`
 
 ```bash
-codex exec --full-auto "$(cat <<'EOF'
+codex -m gpt-5.3-codex exec --full-auto "$(cat <<'EOF'
 ---
 parent_task:
   id: "1.0"
@@ -499,10 +499,43 @@ EOF
 )"
 ```
 
-**For Codex with xhigh reasoning (complexity 4-5):** Use Bash with `codex -c 'model_reasoning_effort="xhigh"' exec`
+**For Codex with medium reasoning (complexity 3):** Use Bash with `codex -m gpt-5.3-codex exec`
 
 ```bash
-codex -c 'model_reasoning_effort="xhigh"' exec --full-auto -- "$(cat <<'EOF'
+codex -m gpt-5.3-codex exec --full-auto "$(cat <<'EOF'
+---
+parent_task:
+  id: "2.0"
+  title: "Implement user validation"
+  complexity: 3
+  verify: "npm test -- --grep validation"
+subtasks:
+  - id: "2.1"
+    description: "Add validation logic"
+    files: "src/services/UserService.ts"
+state_md: |
+  # Execution State
+  ## Cross-Task Learnings
+  (any learnings from previous tasks)
+explore_context: |
+  (content from EXPLORE_CONTEXT.json)
+feature_name: "user-validation"
+task_file: "/tasks/user-validation/task.xml"
+domain_skill: |
+  (content from .claude/skills/domain-backend.md or relevant domain)
+---
+Execute this parent task following the execution-agent patterns.
+Read .claude/agents/execution-agent.md for the full execution protocol.
+Create atomic commit when complete.
+Return structured YAML summary with status, commit SHA, and learnings.
+EOF
+)"
+```
+
+**For Codex with xhigh reasoning (complexity 4-5):** Use Bash with `codex -m gpt-5.3-codex -c 'model_reasoning_effort="xhigh"' exec`
+
+```bash
+codex -m gpt-5.3-codex -c 'model_reasoning_effort="xhigh"' exec --full-auto -- "$(cat <<'EOF'
 ---
 parent_task:
   id: "3.0"
@@ -532,35 +565,19 @@ EOF
 )"
 ```
 
-**For Sonnet (complexity 3):** Use Task tool
-
-```
-Use Task tool with:
-  - subagent_type: "execution-agent"
-  - model: "sonnet"
-  - prompt: YAML handoff content
-```
-
-### Task Tool Model Parameter (Sonnet)
-
-The Task tool accepts a `model` parameter to specify sonnet for complexity 3 tasks.
-
-**Fallback Behavior:**
-- If model parameter is not supported: Log warning, use default model
-- If sonnet unavailable: Fall back to Codex
-- Always log which model is actually being used
-
 ### Codex Execution Notes
 
-When spawning via Codex (gpt-5.2-codex with varying reasoning effort):
+When spawning via Codex 5.3 (gpt-5.3-codex with varying reasoning effort):
+- Use `-m gpt-5.3-codex` to specify the model explicitly
 - Use `--full-auto` for autonomous execution with workspace write access
 - Use `--` separator before prompts that start with `-` or `---`
-- For complexity 4-5 (xhigh reasoning): `codex -c 'model_reasoning_effort="xhigh"' exec --full-auto -- "..."`
-- For complexity 1-2 (medium reasoning): `codex exec --full-auto -- "..."` (medium is default)
+- For complexity 4-5 (xhigh reasoning): `codex -m gpt-5.3-codex -c 'model_reasoning_effort="xhigh"' exec --full-auto -- "..."`
+- For complexity 1-3 (medium reasoning): `codex -m gpt-5.3-codex exec --full-auto -- "..."` (medium is default)
 - The prompt must be self-contained (Codex doesn't inherit conversation context)
 - Include the domain skill content directly in the prompt
 - Codex will read the execution-agent.md file for the full protocol
 - Output is captured; parse for status, commit SHA, and learnings
+- GPT-5.3-Codex is 25% faster and uses <50% tokens vs prior versions
 
 ### Codex Failure Detection and Fallback
 
@@ -596,15 +613,11 @@ codexFailed(exit_code, output):
 **Fallback procedure:**
 ```
 IF codexFailed(exit_code, output):
-  LOG "⚠️ Codex failed for Parent Task {id}. Falling back to sonnet."
+  LOG "⚠️ Codex failed for Parent Task {id}. Retrying with xhigh reasoning."
   LOG "Failure reason: {detected_reason}"
 
-  # Re-spawn same task via Task tool
-  Task(
-    subagent_type: "execution-agent",
-    model: "sonnet",
-    prompt: {same YAML handoff that was sent to Codex}
-  )
+  # Re-spawn same task with elevated reasoning effort
+  codex -m gpt-5.3-codex -c 'model_reasoning_effort="xhigh"' exec --full-auto -- "{same YAML handoff}"
 ELSE:
   # Parse Codex output for learnings
   EXTRACT status, commit_sha, learnings from output
@@ -614,9 +627,9 @@ ELSE:
 
 **Logging on fallback:**
 ```
-Parent Task 1.0 (complexity 2/5) → using codex via Bash
-⚠️ Codex failed (reason: token quota exceeded). Falling back to sonnet via Task tool.
-Parent Task 1.0 (complexity 2/5) → RETRY using sonnet via Task tool
+Parent Task 1.0 (complexity 2/5) → using codex (gpt-5.3-codex, medium) via Bash
+⚠️ Codex failed (reason: token quota exceeded). Retrying with xhigh reasoning.
+Parent Task 1.0 (complexity 2/5) → RETRY using codex-xhigh (gpt-5.3-codex, xhigh) via Bash
 ```
 
 ---
@@ -775,7 +788,7 @@ parent_task: { id, title, complexity, verify }
 subtasks: [...]
 state_md: "..."  # Learnings from COMPLETED waves only
 explore_context: "..."
-model: "sonnet"
+model: "codex"
 feature_name: "..."
 task_file: "/tasks/{feature-name}/task.xml"
 domain_skill: "..."
@@ -913,7 +926,7 @@ After Wave 1 with 3 parallel tasks:
 ### Parent Task 1.0: Create Frontend Component
 
 **Commit:** abc123
-**Model:** sonnet
+**Model:** codex (gpt-5.3-codex)
 **Domain:** frontend
 
 #### Patterns Applied
@@ -925,7 +938,7 @@ After Wave 1 with 3 parallel tasks:
 ### Parent Task 2.0: Create API Endpoint
 
 **Commit:** def456
-**Model:** sonnet
+**Model:** codex (gpt-5.3-codex)
 **Domain:** backend
 
 #### Patterns Applied
@@ -937,7 +950,7 @@ After Wave 1 with 3 parallel tasks:
 ### Parent Task 3.0: Setup Infrastructure
 
 **Commit:** ghi789
-**Model:** codex-xhigh (gpt-5.2-codex, xhigh reasoning)
+**Model:** codex-xhigh (gpt-5.3-codex, xhigh reasoning)
 **Domain:** infrastructure
 
 #### Patterns Applied
@@ -1061,7 +1074,7 @@ handleWaveFailures(wave_results, task_file):
 
 bumpModel(complexity):
   IF complexity < 4:
-    RETURN "codex-xhigh"  # Bump to stronger model (gpt-5.2-codex with xhigh reasoning)
+    RETURN "codex-xhigh"  # Bump to stronger model (gpt-5.3-codex with xhigh reasoning)
   ELSE:
     RETURN "codex-xhigh"  # Already codex-xhigh, keep it
 ```
@@ -1078,7 +1091,7 @@ Output:
   Step 5/8 : RUN npm ci
   npm ERR! Could not resolve dependency
 
-🔄 Retrying with codex-xhigh (gpt-5.2-codex, xhigh reasoning) and error context...
+🔄 Retrying with codex-xhigh (gpt-5.3-codex, xhigh reasoning) and error context...
 ```
 
 **After Retry Fails:**
@@ -1293,7 +1306,7 @@ _Cross-task learnings will be recorded below as parent tasks complete._
 
 **Completed:** 2026-01-12T10:45:00Z
 **Commit:** abc123def456
-**Model Used:** sonnet
+**Model Used:** codex (gpt-5.3-codex)
 
 ### Patterns Applied
 - Service pattern for AuthService with dependency injection
@@ -1312,7 +1325,7 @@ _Cross-task learnings will be recorded below as parent tasks complete._
 
 **Completed:** 2026-01-12T11:30:00Z
 **Commit:** def456ghi789
-**Model Used:** codex-xhigh (gpt-5.2-codex, xhigh reasoning)
+**Model Used:** codex-xhigh (gpt-5.3-codex, xhigh reasoning)
 
 ### Patterns Applied
 - Manager pattern for SessionManager
@@ -1539,9 +1552,9 @@ Task File: task-{feature-name}.xml
 Total Parent Tasks: {count}
 
 Model selection based on complexity:
-- Codex (gpt-5.2-codex, medium): complexity 1-2 (cost efficient, saves Claude tokens)
-- Sonnet: complexity 3 (Claude reasoning)
-- Codex (gpt-5.2-codex, xhigh): complexity 4-5 (deep reasoning)
+- Codex (gpt-5.3-codex, medium): complexity 1-2 (efficient execution)
+- Codex (gpt-5.3-codex, medium): complexity 3 (balanced reasoning)
+- Codex (gpt-5.3-codex, xhigh): complexity 4-5 (deep reasoning)
 
 Initializing STATE.md for cross-task learning...
 Loading EXPLORE_CONTEXT.json...
@@ -1578,7 +1591,7 @@ Spawning execution agent with fresh context and {domain} skill...
 
 Summary:
 - Tasks Completed: {completed}/{total}
-- Models Used: Codex (medium) x{n}, Sonnet x{m}, Codex (xhigh) x{p}
+- Models Used: Codex 5.3 (medium) x{n}, Codex 5.3 (xhigh) x{p}
 - Total Commits: {count}
 
 Running code review...
