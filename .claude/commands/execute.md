@@ -1454,15 +1454,15 @@ After all tasks complete, you MUST run these steps in order. Do NOT skip them. D
 2. INVOKE CODE REVIEW (mandatory)
    Skill(skill="code-review")
    ↓
-3. CTO TRIAGES FINDINGS
+3. CTO TRIAGES FINDINGS (see "Handling Code Review Results" below)
    ↓
-4. FIX AGENTS RUN
+4. FIX AGENTS RUN (spawn execution-agent per finding, same as wave execution)
    ↓
-5. VERIFY FIXES
+5. VERIFY FIXES (re-run verify commands for affected tasks)
    ↓
-6. CTO-ADVISOR TASK COMPLETION REVIEW
+6. CTO-ADVISOR TASK COMPLETION REVIEW (see "CTO-Advisor Task Completion Review" below)
    ↓
-7. CTO RESPONDS TO FINDINGS
+7. HANDLE CTO-ADVISOR VERDICT (PROCEED / FIX_MINOR / ESCALATE)
    ↓
 8. INVOKE MEMORY UPDATE (mandatory)
    Skill(skill="update")
@@ -1523,7 +1523,7 @@ After code review triage and fix verification, invoke a CTO advisor pass to conf
 ```
 Task(
   subagent_type: "cto-technical-advisor",
-  model: "codex-xhigh",
+  model: "opus",  // CTO-advisor is an assessment agent, not a coding task — uses its declared model
   prompt: """
 Decision-ready briefing:
 - Feature: {feature_name}
