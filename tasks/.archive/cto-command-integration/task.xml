@@ -1,0 +1,582 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<execution_plan>
+  <metadata>
+    <feature_name>cto-command-integration</feature_name>
+    <generated_from>prd.md</generated_from>
+    <date>2026-02-10</date>
+    <total_parent_tasks>7</total_parent_tasks>
+    <architecture_pattern>Agent file reference pattern (personality overlay)</architecture_pattern>
+    <build_command>echo "Prompt files only -- no build step"</build_command>
+  </metadata>
+
+  <!-- ========== PHASE 1: FOUNDATION ========== -->
+
+  <parent_task id="1.0" complexity="2" status="pending">
+    <title>Create Project-Level CTO Agent File</title>
+    <goal>Copy ~/.claude/agents/cto.md into .claude/agents/cto.md as the single source of truth for CTO personality across all commands. Verify the copy is exact.</goal>
+    <verify>diff ~/.claude/agents/cto.md .claude/agents/cto.md &amp;&amp; git ls-files --error-unmatch .claude/agents/cto.md 2>/dev/null || echo "File exists, verify git tracking after commit"</verify>
+    <files>
+      <file action="create">.claude/agents/cto.md</file>
+    </files>
+    <subtasks>
+      <subtask id="1.1" complexity="1" status="pending">
+        <description>Copy ~/.claude/agents/cto.md to .claude/agents/cto.md</description>
+        <files>.claude/agents/cto.md</files>
+        <details>Read the source file at ~/.claude/agents/cto.md (142 lines, includes YAML frontmatter with name/description/model/color/disallowedTools, values section, project context, established patterns, decision process, escalation criteria, response format, communication style, boundaries). Write an exact copy to .claude/agents/cto.md. The file must be byte-identical to the source.
+
+Validation: Run diff between source and target -- zero differences expected.</details>
+      </subtask>
+      <subtask id="1.2" complexity="1" status="pending">
+        <description>Verify the CTO agent file parses correctly</description>
+        <files>.claude/agents/cto.md</files>
+        <details>Confirm the YAML frontmatter is valid (name: cto, description present, model: opus, color: green, disallowedTools: Write, Edit, NotebookEdit). Confirm the markdown body contains all expected sections: Your Values, Project Context, Established Technical Patterns, Decision Process, What You Decide vs Escalate, Response Format, Communication Style, Boundaries.</details>
+      </subtask>
+    </subtasks>
+  </parent_task>
+
+  <parent_task id="2.0" complexity="3" status="completed">
+    <title>Update CTO-Advisor Agent Relationship and Tone</title>
+    <goal>Update .claude/agents/cto-technical-advisor.md to understand its relationship with the CTO agent, align its tone with CTO values, add disallowedTools, and restructure output for decision-ready briefings -- while preserving all existing standalone capabilities.</goal>
+    <verify>grep -q "Relationship to CTO" .claude/agents/cto-technical-advisor.md &amp;&amp; grep -q "disallowedTools" .claude/agents/cto-technical-advisor.md &amp;&amp; echo "CTO-advisor update verified"</verify>
+    <pattern_reference>PATTERNS.md:Command-Agent Delegation</pattern_reference>
+    <files>
+      <file action="modify">.claude/agents/cto-technical-advisor.md</file>
+    </files>
+    <subtasks>
+      <subtask id="2.1" complexity="2" status="completed">
+        <description>Add disallowedTools to CTO-advisor frontmatter</description>
+        <files>.claude/agents/cto-technical-advisor.md</files>
+        <details>Add `disallowedTools: Write, Edit, NotebookEdit` to the YAML frontmatter. The frontmatter currently has: name, description, model, color. Add disallowedTools after color. Verify YAML parses correctly after the change.</details>
+      </subtask>
+      <subtask id="2.2" complexity="3" status="completed">
+        <description>Replace corporate identity framing with values-aligned tone</description>
+        <files>.claude/agents/cto-technical-advisor.md</files>
+        <details>The current opening line is: "You are a Chief Technology Officer bringing 20 years of battle-tested experience building software products across multiple technology eras."
+
+Replace this corporate framing with a values-aligned identity that matches the CTO agent's tone (direct, warm, grounded). The advisor is a technical research partner -- thorough, honest, and practical. Remove any corporate buzzwords ("battle-tested", "technology eras", "monoliths to microservices"). Keep the expertise areas (Architectural Vision, Technology Pragmatism, Platform Constraints, Cost-Benefit Analysis, Pattern Recognition) but rewrite them in the CTO's direct style.
+
+Preserve the Communication Style section but align it with CTO values: remove "Historically Informed: Reference similar challenges from past projects" (corporate pattern) and ensure the style is direct, warm, and grounded.</details>
+      </subtask>
+      <subtask id="2.3" complexity="2" status="completed">
+        <description>Add "Relationship to CTO" section explaining dual-use role</description>
+        <files>.claude/agents/cto-technical-advisor.md</files>
+        <details>Add a new section after the identity paragraph titled "## Relationship to CTO". This section must explain two usage modes:
+
+(a) When invoked by the CTO (via Task tool from execute.md): Deliver a decision-ready briefing. Be concise. Lead with verdict and confidence. Structure findings as bullet points the CTO can act on immediately. Use the decision-ready briefing format (see FR2.4 in PRD).
+
+(b) When invoked standalone by the user: Deliver full advisory response as today. Provide the complete 7-step response structure with detailed analysis, multiple options, and educational context.
+
+The section should make clear: same agent, same capabilities, different output format depending on caller.</details>
+      </subtask>
+      <subtask id="2.4" complexity="2" status="completed">
+        <description>Update response structure for decision-ready briefing format</description>
+        <files>.claude/agents/cto-technical-advisor.md</files>
+        <details>Update the "Your Response Structure" section (currently a 7-step structure at lines 80-88) to support both output modes.
+
+For CTO consumption (decision-ready briefing):
+```
+**Verdict:** [Clear one-line assessment]
+**Confidence:** [X%]
+**Key Findings:**
+- [Finding with evidence]
+**Gaps (if any):**
+- [Gap]: [severity] -- [what's missing]
+**Recommendation:** [PROCEED / FIX_MINOR / ESCALATE]
+**Rationale:** [2-3 sentences]
+```
+
+For standalone use: Keep the existing 7-step structure (Quick Assessment, Technical Analysis, Project Context, Implementation Options, Recommendation, Risks and Mitigations, Alternative Perspectives) but update each step to produce output optimised for a decision-maker (clear verdict, trade-offs as bullet points, recommendation with confidence level).
+
+Preserve ALL existing capabilities: feasibility spectrum (Trivial through Infeasible), implementation options (2-3 with effort estimates), risk assessment, mandatory .ai/ memory reading.</details>
+      </subtask>
+      <subtask id="2.5" complexity="1" status="completed">
+        <description>Verify standalone capabilities are preserved</description>
+        <files>.claude/agents/cto-technical-advisor.md</files>
+        <details>After all modifications, verify the file still contains:
+- Feasibility Spectrum (Trivial, Straightforward, Complex, Challenging, Impractical, Infeasible)
+- Implementation Analysis section (alignment, components, platform limitations, cost implications)
+- Strategic Considerations section
+- Risk Assessment section
+- Mandatory .ai/ memory reading instructions (QUICK.md, ARCHITECTURE.json, PATTERNS.md, BUSINESS.json, FILES.json)
+- Quality Assurance checklist at the end
+- Boundaries section
+
+No capability should be removed. Only tone, identity framing, and output format are changing.</details>
+      </subtask>
+    </subtasks>
+  </parent_task>
+
+  <!-- ========== PHASE 2: CORE COMMAND INTEGRATION ========== -->
+
+  <parent_task id="3.0" complexity="4" status="pending">
+    <title>Integrate CTO Personality into Execute Command</title>
+    <goal>Add CTO personality overlay, Decision Authority section, CTO-driven code review triage, and CTO-advisor task completion review to execute.md. This is the most substantial integration -- it replaces user-interrupting triage with autonomous CTO decisions and adds a new post-code-review verification step.</goal>
+    <verify>grep -q "Read .claude/agents/cto.md" .claude/commands/execute.md &amp;&amp; grep -q "Decision Authority" .claude/commands/execute.md &amp;&amp; grep -q "cto-technical-advisor" .claude/commands/execute.md &amp;&amp; echo "Execute CTO integration verified"</verify>
+    <pattern_reference>PATTERNS.md:Command-Agent Delegation, ARCHITECTURE.json:commandAgentDelegation</pattern_reference>
+    <files>
+      <file action="modify">.claude/commands/execute.md</file>
+    </files>
+    <subtasks>
+      <subtask id="3.1" complexity="2" status="pending">
+        <description>Add CTO personality adoption instruction after orchestrator identity section</description>
+        <files>.claude/commands/execute.md</files>
+        <details>After line 97 (end of "CRITICAL: You Are an ORCHESTRATOR" section, before the next "---" separator), add a new section:
+
+```markdown
+---
+
+## CTO Decision-Making Framework
+
+Read `.claude/agents/cto.md` and adopt its decision-making framework for all judgment calls during orchestration. You are the CTO-orchestrator: lightweight orchestrator with CTO decision-making authority.
+
+**If `.claude/agents/cto.md` is not found:** Log warning "CTO agent file not found. Running without CTO decision-making framework." and proceed with existing behavior (user triage for code review, questions for architectural decisions).
+
+**Key principle:** The CTO personality is additive decision authority -- it does NOT override orchestrator constraints. You still delegate ALL coding to execution agents. You still do not edit code. The CTO framework gives you authority to make judgment calls that would otherwise interrupt the user.
+```
+
+This positions the CTO adoption after the orchestrator understands its role but before it starts building waves.</details>
+      </subtask>
+      <subtask id="3.2" complexity="2" status="pending">
+        <description>Update "DO NOT make implementation decisions" line to reflect CTO authority</description>
+        <files>.claude/commands/execute.md</files>
+        <details>Find line 23 which currently reads:
+"- **DO NOT** make implementation decisions"
+
+Replace with:
+"- **DO NOT** make implementation decisions at the code level -- delegate ALL coding to execution agents. You DO make architectural and strategic decisions using your CTO decision-making framework."
+
+This preserves the core constraint (no code-level decisions) while granting CTO-level architectural authority.</details>
+      </subtask>
+      <subtask id="3.3" complexity="3" status="pending">
+        <description>Add Decision Authority section defining CTO decides vs escalates</description>
+        <files>.claude/commands/execute.md</files>
+        <details>After the CTO personality adoption section (added in 3.1), add:
+
+```markdown
+### Decision Authority
+
+**CTO-orchestrator DECIDES (no user interruption):**
+- Code review finding triage: fix/defer/skip for ALL severity levels
+- Fix agent spawning strategy and approach
+- Task completion review response (proceed/fix/escalate)
+- Wave ordering adjustments based on execution state
+- Technical approach questions from execution agents
+
+**CTO-orchestrator ESCALATES to user (per CTO escalation criteria):**
+- Costs above ~$20/month
+- Commitments to external services that create lock-in
+- Decisions that affect other people
+- Genuine value conflicts where there is no clear resolution
+- Scope changes that redefine what the feature IS
+- Anything where confidence is below ~70% AND the downside of being wrong is significant
+
+When escalating, include: what the question is, what you have considered, your recommended direction, and what specifically you are uncertain about.
+```
+
+These criteria must match the CTO.md escalation criteria exactly.</details>
+      </subtask>
+      <subtask id="3.4" complexity="3" status="pending">
+        <description>Replace code review failure handling with CTO-driven autonomous triage</description>
+        <files>.claude/commands/execute.md</files>
+        <details>Replace the "Handling Code Review Results" section (lines 1449-1469) with CTO-driven autonomous triage. The current behavior pauses for user on CRITICAL/HIGH findings. The new behavior has the CTO triage ALL findings autonomously.
+
+Replace with:
+
+```markdown
+### Handling Code Review Results
+
+**CTO Autonomous Triage (no user interruption for technical decisions):**
+
+For EACH finding returned by code review, the CTO-orchestrator triages:
+
+**CRITICAL findings:** Spawn fix agent immediately. No deliberation needed.
+
+**HIGH findings:** Spawn fix agent immediately. Brief CTO rationale in STATE.md.
+
+**MEDIUM findings:** CTO assesses each one:
+- If real issue that affects correctness or maintainability: spawn fix agent
+- If style preference or minor improvement: defer to tech debt (.ai/TECH_DEBT.md)
+- Log triage decision in STATE.md
+
+**LOW findings:** CTO assesses each one:
+- If valid minor improvement worth capturing: defer to tech debt
+- If negligible or noise: skip
+- Log triage decision in STATE.md
+
+**Triage Decision Format (log in STATE.md):**
+```
+[CR-NNN] Severity: [X] | Action: [FIX_NOW/DEFER_TECH_DEBT/SKIP] | Reason: [brief CTO rationale]
+```
+
+**Error Handling:**
+- If a fix agent fails on a CRITICAL finding: escalate to user with full context
+- If more than 3 fix agents fail across any severity: escalate entire review to user
+- If CTO is less than 70% confident on a triage decision AND downside is significant: escalate that specific finding to user
+
+**After triage completes:**
+- If fix agents were spawned: wait for all to complete, verify fixes pass
+- If all fixes pass (or no fixes needed): proceed to task completion review
+- If fixes fail: apply error handling rules above
+
+Do NOT proceed to memory update until both code review triage AND task completion review pass.
+```
+
+This removes ALL "pause for user" and "ask user" language from the triage section.</details>
+      </subtask>
+      <subtask id="3.5" complexity="3" status="pending">
+        <description>Add CTO-advisor task completion review step after code review</description>
+        <files>.claude/commands/execute.md</files>
+        <details>Add a new section between the code review triage (modified in 3.4) and the memory update section. This is a new post-code-review step.
+
+```markdown
+---
+
+## Post-Execution: CTO-Advisor Task Completion Review
+
+After code review passes (with or without CTO-triaged fixes), invoke CTO-advisor for holistic task completion verification.
+
+### Task Completion Review Invocation
+
+```
+Task(
+  subagent_type: "cto-technical-advisor",
+  prompt: """
+  Review task completion for: [TASK_FILE_PATH]
+  Feature: [FEATURE_NAME]
+
+  Verify all tasks in the XML file were completed correctly:
+  1. All parent tasks have status=done
+  2. Verify steps results (pass/fail)
+  3. Commits exist for each completed task
+  4. No tasks skipped or partially implemented
+  5. Overall feature coherence (do the pieces fit together?)
+
+  STATE.md content:
+  [PASTE STATE.md CONTENT HERE]
+
+  Return decision-ready briefing format:
+  - Verdict: [one-line assessment]
+  - Confidence: [percentage]
+  - Key Findings: [bullet points]
+  - Gaps (if any): [gap: severity -- what is missing]
+  - Recommendation: [PROCEED / FIX_MINOR / ESCALATE]
+  - Rationale: [2-3 sentences]
+  """
+)
+```
+
+### Handling Task Completion Review Results
+
+**If recommendation is PROCEED:**
+- Log: "Task completion review passed. Proceeding to memory update."
+- Continue to memory update phase
+
+**If recommendation is FIX_MINOR:**
+- CTO-orchestrator assesses each gap
+- For minor gaps (missing test case, documentation gap): spawn fix agent with specific instructions
+- Wait for fix agents to complete
+- Proceed to memory update (do NOT re-run full task completion review for minor fixes)
+
+**If recommendation is ESCALATE:**
+- CTO-orchestrator presents gaps to user with CTO-advisor's analysis
+- Include: what was found, severity, CTO's assessment, recommended action
+- Wait for user direction before proceeding
+```
+
+This adds step 6-7 to the post-execution flow as specified in FR3.6.</details>
+      </subtask>
+      <subtask id="3.6" complexity="2" status="pending">
+        <description>Update the post-execution flow diagram to reflect new 9-step flow</description>
+        <files>.claude/commands/execute.md</files>
+        <details>Replace the existing flow diagram in "CRITICAL: Post-Execution Steps Are MANDATORY" section (lines 1421-1431) with the updated 9-step flow:
+
+```
+1. ALL TASKS COMPLETE
+   |
+2. INVOKE CODE REVIEW (mandatory)
+   Skill(skill="code-review")
+   |
+3. CTO TRIAGES CODE REVIEW FINDINGS (autonomous)
+   - CRITICAL/HIGH: spawn fix agents
+   - MEDIUM: CTO decides fix/defer
+   - LOW: CTO decides skip/tech-debt
+   |
+4. FIX AGENTS RUN (if any spawned)
+   |
+5. VERIFY FIXES PASS
+   |
+6. CTO-ADVISOR TASK COMPLETION REVIEW (new)
+   - Verifies all XML tasks completed correctly
+   |
+7. CTO RESPONDS TO ADVISOR FINDINGS (new)
+   - Minor gaps: spawn fix agent
+   - Significant gaps: escalate to user
+   |
+8. INVOKE MEMORY UPDATE (mandatory)
+   Skill(skill="update")
+   |
+9. OFFER ARCHIVE WORKFLOW
+```
+
+Also update the text "After all tasks complete, you MUST run these steps in order" to reflect the expanded flow.</details>
+      </subtask>
+    </subtasks>
+  </parent_task>
+
+  <parent_task id="4.0" complexity="3" status="pending">
+    <title>Integrate CTO Personality into PRD, Bugs, and Feature Commands</title>
+    <goal>Add CTO personality overlay and Decision Authority sections to prd.md, bugs.md, and feature.md. Update each command's decision points so architectural and technical decisions are made by CTO judgment rather than asked to the user.</goal>
+    <verify>grep -q "Read .claude/agents/cto.md" .claude/commands/prd.md &amp;&amp; grep -q "Read .claude/agents/cto.md" .claude/commands/bugs.md &amp;&amp; grep -q "Read .claude/agents/cto.md" .claude/commands/feature.md &amp;&amp; grep -q "Decision Authority" .claude/commands/prd.md &amp;&amp; grep -q "Decision Authority" .claude/commands/bugs.md &amp;&amp; grep -q "Decision Authority" .claude/commands/feature.md &amp;&amp; echo "All three commands CTO integration verified"</verify>
+    <pattern_reference>PATTERNS.md:Command-Agent Delegation</pattern_reference>
+    <files>
+      <file action="modify">.claude/commands/prd.md</file>
+      <file action="modify">.claude/commands/bugs.md</file>
+      <file action="modify">.claude/commands/feature.md</file>
+    </files>
+    <subtasks>
+      <subtask id="4.1" complexity="2" status="pending">
+        <description>Add CTO personality overlay and Decision Authority to prd.md</description>
+        <files>.claude/commands/prd.md</files>
+        <details>After the "Role &amp; Authority" section (ends around line 23, before "Core Philosophy"), add:
+
+```markdown
+---
+
+## CTO Decision-Making Framework
+
+Read `.claude/agents/cto.md` and adopt its decision-making framework. During discovery rounds, make architectural decisions using CTO values instead of asking the user. Escalate only per CTO escalation criteria.
+
+**If `.claude/agents/cto.md` is not found:** Fall back to existing behavior (ask user for architectural decisions).
+
+### Decision Authority
+
+**CTO DECIDES during PRD discovery (no user interruption):**
+- Storage approach and data architecture
+- Integration patterns and API design
+- Tooling choices within established patterns
+- Implementation strategy and technical approach
+- Component structure and file organisation
+
+**CTO ESCALATES to user:**
+- Costs above ~$20/month
+- Commitments to external services that create lock-in
+- Scope changes that redefine what the feature IS
+- Decisions affecting other people
+- Anything where confidence is below ~70% AND downside is significant
+
+**How this changes the questioning process:** When a discovery round surfaces an architectural question (e.g., "Follow existing pattern or introduce new?", "Integrate with X or standalone?"), the CTO makes the call and states the decision briefly in the round summary ("Going with [pattern] because [reason]"). User-facing questions are purely about requirements and desired behavior, not technical approach.
+```
+
+This section should appear after Role &amp; Authority and before Core Philosophy so it frames all subsequent discovery work.</details>
+      </subtask>
+      <subtask id="4.2" complexity="2" status="pending">
+        <description>Add CTO personality overlay and Decision Authority to bugs.md</description>
+        <files>.claude/commands/bugs.md</files>
+        <details>After the "Role &amp; Authority" section (ends around line 24, before "Core Philosophy"), add:
+
+```markdown
+---
+
+## CTO Decision-Making Framework
+
+Read `.claude/agents/cto.md` and adopt its decision-making framework. During bug investigation, make technical assessment decisions using CTO values. Escalate only per CTO escalation criteria.
+
+**If `.claude/agents/cto.md` is not found:** Fall back to existing behavior (present options to user for all decisions).
+
+### Decision Authority
+
+**CTO DECIDES during bug investigation (no user interruption):**
+- Complexity score validation (adjust Explore's assessment if CTO disagrees)
+- Tier routing decision (inline 1-2 / task-writer 3-6 / prd-writer 7+)
+- Solution recommendation (which fix option from Phase 4)
+- Effort estimation validation
+
+**CTO ESCALATES to user:**
+- Fixes affecting other people's workflows
+- Fixes with recurring costs above ~$20/month
+- Fixes where CTO is less than 70% confident on root cause
+- Genuine value conflicts in fix approach
+
+**How this changes Phase 5:** When the investigation reaches the recommendation phase, the CTO validates Explore's complexity assessment, makes the tier call, and states the decision: "Going with [tier] because [reason]." The CTO proceeds directly to handoff without waiting for user confirmation on technical approach. If the CTO disagrees significantly with Explore's assessment, it states its reasoning and proceeds with its own assessment.
+```
+
+This section should appear after Role &amp; Authority and before Core Philosophy.</details>
+      </subtask>
+      <subtask id="4.3" complexity="2" status="pending">
+        <description>Add CTO personality overlay and Decision Authority to feature.md</description>
+        <files>.claude/commands/feature.md</files>
+        <details>After the "Role &amp; Authority" section (ends around line 24, before "Core Philosophy"), add:
+
+```markdown
+---
+
+## CTO Decision-Making Framework
+
+Read `.claude/agents/cto.md` and adopt its decision-making framework. During feature analysis, make design and architectural decisions using CTO values. Escalate only per CTO escalation criteria.
+
+**If `.claude/agents/cto.md` is not found:** Fall back to existing behavior (present options to user for all decisions).
+
+### Decision Authority
+
+**CTO DECIDES during feature analysis (no user interruption):**
+- Complexity score validation (adjust Explore's assessment if CTO disagrees)
+- Tier routing decision (inline 1-2 / task-writer 3-6 / prd-writer 7+)
+- Design approach and pattern selection
+- Component structure decisions
+- Effort estimation validation
+
+**CTO ESCALATES to user:**
+- Features affecting other people
+- Scope changes that redefine what the feature IS
+- Costs above ~$20/month
+- Anything where confidence is below ~70% AND downside is significant
+
+**How this changes Phase 5:** When the analysis reaches the output decision, the CTO validates Explore's complexity assessment, makes the tier call, and proceeds to handoff. For inline implementation (complexity 1-2), CTO proceeds without confirmation. For task-writer handoff (3-6), CTO proceeds with brief decision statement. For prd-writer handoff (7+), CTO proceeds with rationale for the complexity assessment.
+```
+
+This section should appear after Role &amp; Authority and before Core Philosophy.</details>
+      </subtask>
+      <subtask id="4.4" complexity="1" status="pending">
+        <description>Verify consistent Decision Authority format across all four commands</description>
+        <files>.claude/commands/execute.md, .claude/commands/prd.md, .claude/commands/bugs.md, .claude/commands/feature.md</files>
+        <details>After all four commands are updated, verify consistency:
+
+1. All four commands have identical CTO file reference instruction: "Read `.claude/agents/cto.md` and adopt its decision-making framework"
+2. All four commands have identical fallback behavior for missing CTO.md
+3. All four commands have a "Decision Authority" subsection with "CTO DECIDES" and "CTO ESCALATES" lists
+4. Escalation criteria are consistent across all four (matching CTO.md source): costs >$20/month, external lock-in, people decisions, value conflicts, scope changes, less than 70% confidence + high downside
+5. Section heading format is consistent: "## CTO Decision-Making Framework" with "### Decision Authority" subsection</details>
+      </subtask>
+    </subtasks>
+  </parent_task>
+
+  <!-- ========== PHASE 3: VERIFICATION ========== -->
+
+  <parent_task id="5.0" complexity="2" status="pending">
+    <title>Run Verification Commands</title>
+    <goal>Verify all integration points are correctly wired: CTO file exists and matches source, all commands reference it, Decision Authority sections are present and consistent, execute.md has the updated post-execution flow, and fallback behavior is documented everywhere.</goal>
+    <verify>echo "All verification checks passed"</verify>
+    <files>
+      <file action="review">.claude/agents/cto.md</file>
+      <file action="review">.claude/agents/cto-technical-advisor.md</file>
+      <file action="review">.claude/commands/execute.md</file>
+      <file action="review">.claude/commands/prd.md</file>
+      <file action="review">.claude/commands/bugs.md</file>
+      <file action="review">.claude/commands/feature.md</file>
+    </files>
+    <subtasks>
+      <subtask id="5.1" complexity="1" status="pending">
+        <description>Verify CTO agent file is identical to source</description>
+        <details>Run: diff ~/.claude/agents/cto.md .claude/agents/cto.md
+Expected: zero differences.
+
+If differences found, investigate whether they are intentional (unlikely -- PRD says exact copy) or errors.</details>
+      </subtask>
+      <subtask id="5.2" complexity="1" status="pending">
+        <description>Verify all four commands reference CTO agent file</description>
+        <details>Run: grep -l "Read .claude/agents/cto.md" .claude/commands/execute.md .claude/commands/prd.md .claude/commands/bugs.md .claude/commands/feature.md
+Expected: all four files listed.
+
+Run: grep -l "Decision Authority" .claude/commands/execute.md .claude/commands/prd.md .claude/commands/bugs.md .claude/commands/feature.md
+Expected: all four files listed.</details>
+      </subtask>
+      <subtask id="5.3" complexity="1" status="pending">
+        <description>Verify execute.md has updated post-execution flow</description>
+        <details>Check execute.md contains:
+1. "CTO Decision-Making Framework" section header
+2. "Decision Authority" subsection
+3. Updated code review triage (no "pause for user" or "ask user" in triage)
+4. "cto-technical-advisor" Task tool invocation for task completion review
+5. 9-step post-execution flow diagram
+6. Fallback behavior for missing CTO.md
+
+Run: grep -c "pause for user\|ask user\|ask the user" in the code review triage section -- should return 0.</details>
+      </subtask>
+      <subtask id="5.4" complexity="1" status="pending">
+        <description>Verify CTO-advisor preserves standalone capabilities</description>
+        <details>Check cto-technical-advisor.md contains:
+1. "Relationship to CTO" section
+2. "disallowedTools: Write, Edit, NotebookEdit" in frontmatter
+3. Feasibility Spectrum (Trivial through Infeasible)
+4. Implementation Analysis section
+5. Strategic Considerations section
+6. Risk Assessment section
+7. Mandatory .ai/ memory reading instructions
+8. Decision-ready briefing format documentation
+9. No instances of "20 years of battle-tested experience" or similar corporate framing</details>
+      </subtask>
+      <subtask id="5.5" complexity="1" status="pending">
+        <description>Verify escalation criteria consistency across all commands</description>
+        <details>Compare escalation criteria in all four Decision Authority sections against CTO.md source. All should include:
+- Costs above ~$20/month
+- External service lock-in
+- Decisions affecting other people
+- Value conflicts
+- Scope changes
+- Less than 70% confidence + significant downside
+
+Any inconsistency must be corrected to match the CTO.md source exactly.</details>
+      </subtask>
+    </subtasks>
+  </parent_task>
+
+  <!-- ========== MANDATORY FINAL TASKS ========== -->
+
+  <parent_task id="6.0" complexity="2" status="pending">
+    <title>Code Review</title>
+    <goal>Verify implementation quality before memory update</goal>
+    <verify>echo "Code review completed"</verify>
+    <files>
+      <file action="review">All modified files from previous tasks</file>
+    </files>
+    <subtasks>
+      <subtask id="6.1" complexity="2" status="pending">
+        <description>Checkpoint placeholder for orchestrated code review</description>
+        <details>This is a checkpoint placeholder. The orchestrator invokes Skill(skill="code-review") to run the review.
+Dual-model review (Claude + Codex in parallel) is the default.
+Address all CRITICAL and HIGH findings before proceeding.
+Re-run code review if significant fixes were made.
+GATE: Only proceed to memory update when code review passes.</details>
+      </subtask>
+    </subtasks>
+  </parent_task>
+
+  <parent_task id="7.0" complexity="2" status="pending">
+    <title>Memory System Update</title>
+    <goal>Update .ai/ memory files with learnings from this feature</goal>
+    <verify>echo "Memory update completed"</verify>
+    <files>
+      <file action="modify">.ai/FILES.json</file>
+      <file action="modify">.ai/PATTERNS.md</file>
+      <file action="modify">.ai/BUSINESS.json</file>
+      <file action="modify">.ai/ARCHITECTURE.json</file>
+      <file action="modify">.ai/TODO.md</file>
+    </files>
+    <subtasks>
+      <subtask id="7.1" complexity="2" status="pending">
+        <description>Update memory system with new files and patterns</description>
+        <details>PREREQUISITE: Code review must pass first.
+
+Update FILES.json:
+- Add .claude/agents/cto.md to agents section
+- Update dependencies for execute.md, prd.md, bugs.md, feature.md to show they reference .claude/agents/cto.md
+- Update cto-technical-advisor.md dependency info
+
+Update PATTERNS.md:
+- Add new pattern: "CTO Personality Overlay" -- read agent file at startup, adopt decision framework, use for judgment calls
+- Add new pattern: "Decision Authority Section" -- standardised section format defining what a command decides vs escalates
+
+Update BUSINESS.json:
+- Add "ctoCommandIntegration" to features with status: complete
+- Document key components: CTO personality overlay, Decision Authority sections, autonomous code review triage, task completion review
+
+Update ARCHITECTURE.json:
+- Add "ctoPersonalityOverlay" to corePatterns documenting the new pattern
+- Update commandAgentDelegation constraints to note CTO personality adoption
+
+Update TODO.md with feature completion status.</details>
+      </subtask>
+    </subtasks>
+  </parent_task>
+
+</execution_plan>
