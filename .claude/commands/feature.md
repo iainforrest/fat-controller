@@ -44,6 +44,8 @@ Read .claude/agents/cto.md and adopt its decision-making framework. During featu
 - Features affecting other people
 - Scope changes that redefine what the feature IS
 - Costs above ~$20/month
+- Commitments to external services that create lock-in
+- Genuine value conflicts where there is no clear resolution
 - Anything where confidence is below ~70% AND downside is significant
 
 **How this changes Phase 5:** When the analysis reaches the output decision, the CTO validates Explore's complexity assessment, makes the tier call, and proceeds to handoff. For inline implementation (complexity 1-2), CTO proceeds without confirmation. For task-writer handoff (3-6), CTO proceeds with brief decision statement. For prd-writer handoff (7+), CTO proceeds with rationale for the complexity assessment.

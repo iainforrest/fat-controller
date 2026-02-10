@@ -42,8 +42,10 @@ Read .claude/agents/cto.md and adopt its decision-making framework. During bug i
 **CTO ESCALATES to user:**
 - Fixes affecting other people's workflows
 - Fixes with recurring costs above ~$20/month
-- Fixes where CTO is less than 70% confident on root cause
+- Commitments to external services that create lock-in
+- Scope changes that redefine what the fix IS
 - Genuine value conflicts in fix approach
+- Fixes where CTO is less than 70% confident on root cause AND downside is significant
 
 **How this changes Phase 5:** When the investigation reaches the recommendation phase, the CTO validates Explore's complexity assessment, makes the tier call, and states the decision: "Going with [tier] because [reason]." The CTO proceeds directly to handoff without waiting for user confirmation on technical approach. If the CTO disagrees significantly with Explore's assessment, it states its reasoning and proceeds with its own assessment.
 

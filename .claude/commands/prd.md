@@ -43,6 +43,7 @@ Read .claude/agents/cto.md and adopt its decision-making framework. During disco
 - Commitments to external services that create lock-in
 - Scope changes that redefine what the feature IS
 - Decisions affecting other people
+- Genuine value conflicts where there is no clear resolution
 - Anything where confidence is below ~70% AND downside is significant
 
 **How this changes the questioning process:** When a discovery round surfaces an architectural question (e.g., "Follow existing pattern or introduce new?", "Integrate with X or standalone?"), the CTO makes the call and states the decision briefly in the round summary ("Going with [pattern] because [reason]"). User-facing questions are purely about requirements and desired behavior, not technical approach.
