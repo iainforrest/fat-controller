@@ -139,9 +139,18 @@ def _handle_sigint(signum: int, frame: Any) -> None:
 signal.signal(signal.SIGINT, _handle_sigint)
 
 
-def check_shutdown() -> None:
-    """Check if a graceful shutdown was requested and exit if so."""
+def check_shutdown(state: Optional[OrchestratorState] = None) -> None:
+    """Check if a graceful shutdown was requested and exit if so.
+
+    If state is provided, logs the current orchestrator state (cycle count,
+    sprint progress) before exiting for debugging and resume purposes.
+    """
     if _shutting_down:
+        if state is not None:
+            logger.info(
+                "Graceful shutdown: cycle %d/%d, %d sprints tracked",
+                state.cycle_count, state.max_cycles, len(state.sprints),
+            )
         logger.info("Graceful shutdown: exiting between operations")
         sys.exit(0)
 
@@ -688,6 +697,89 @@ def checkout_main(project_dir: Path) -> bool:
     return False
 
 
+def merge_branch(branch_name: str, project_dir: Path) -> tuple:
+    """Merge a sprint branch back to main.
+
+    Checks out main first, then merges the sprint branch with --no-edit.
+    On conflict, aborts the merge and returns conflict details for PM
+    to create a conflict-resolution sprint.
+
+    Args:
+        branch_name: The sprint branch to merge (e.g., "sprint/my-sprint")
+        project_dir: Path to the project git repository
+
+    Returns:
+        Tuple of (success: bool, details: str). On conflict, details
+        contains the conflicting file list. On success, details is empty.
+    """
+    # Checkout main before merging
+    if not checkout_main(project_dir):
+        return (False, "Failed to checkout main branch before merge")
+
+    logger.info("Merging branch '%s' into main", branch_name)
+
+    # Attempt the merge
+    result = git_run(
+        ["merge", branch_name, "--no-edit"], project_dir, check=False
+    )
+
+    if result.returncode == 0:
+        logger.info("Branch '%s' merged successfully", branch_name)
+        return (True, "")
+
+    # Merge failed -- check if it's a conflict
+    stderr = result.stderr or ""
+    stdout = result.stdout or ""
+
+    if "CONFLICT" in stdout or "CONFLICT" in stderr:
+        # Collect conflict details before aborting
+        diff_result = git_run(["diff", "--name-only", "--diff-filter=U"], project_dir, check=False)
+        conflicting_files = diff_result.stdout.strip() if diff_result.stdout else "unknown"
+
+        # Abort the merge to leave the repo in a clean state
+        git_run(["merge", "--abort"], project_dir, check=False)
+
+        conflict_details = (
+            f"Merge conflict in branch '{branch_name}'. "
+            f"Conflicting files: {conflicting_files}"
+        )
+        logger.warning(conflict_details)
+        return (False, conflict_details)
+
+    # Non-conflict merge failure (e.g., branch not found, dirty working tree)
+    error_msg = f"Merge of '{branch_name}' failed: {stderr.strip() or stdout.strip()}"
+    logger.error(error_msg)
+    return (False, error_msg)
+
+
+def delete_branch(branch_name: str, project_dir: Path) -> bool:
+    """Delete a merged sprint branch.
+
+    Uses 'git branch -d' which only deletes if the branch has been
+    fully merged. Logs a warning on failure but does not raise -- branch
+    cleanup is non-blocking.
+
+    Args:
+        branch_name: The branch to delete (e.g., "sprint/my-sprint")
+        project_dir: Path to the project git repository
+
+    Returns:
+        True if deleted, False otherwise.
+    """
+    result = git_run(["branch", "-d", branch_name], project_dir, check=False)
+
+    if result.returncode == 0:
+        logger.info("Deleted branch '%s'", branch_name)
+        return True
+
+    # Non-blocking failure -- log warning and continue
+    logger.warning(
+        "Failed to delete branch '%s': %s",
+        branch_name, (result.stderr or "").strip(),
+    )
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Context builders
 # ---------------------------------------------------------------------------
@@ -714,10 +806,19 @@ def build_pm_context(
         for pr in pl_results:
             sprint = pr.get("sprint", {})
             sig = pr.get("signal", {})
+            merge_info = ""
+            if pr.get("merge_success") is True:
+                merge_info = "\n  Merge: succeeded (branch merged and deleted)"
+            elif pr.get("merge_success") is False:
+                merge_info = (
+                    f"\n  Merge: CONFLICT -- {pr.get('merge_details', 'unknown')}"
+                    "\n  Action needed: create conflict-resolution sprint or manual merge"
+                )
             parts.append(
                 f"Sprint: {sprint.get('name', 'unknown')}\n"
                 f"  Signal: {sig.get('signal', 'unknown')}\n"
                 f"  Summary: {sig.get('summary', sig.get('details', sig.get('blocker_description', 'N/A')))}"
+                f"{merge_info}"
             )
         parts.append("--- END PL RESULTS ---")
 
@@ -759,7 +860,7 @@ def execute_sprints(
         processes: List[tuple] = []
 
         for idx, sprint in enumerate(parallel):
-            check_shutdown()
+            check_shutdown(state)
 
             # Checkout main before creating each branch
             checkout_main(state.project_dir)
@@ -806,7 +907,7 @@ def execute_sprints(
 
     # --- Sequential sprints ---
     for sprint in sequential:
-        check_shutdown()
+        check_shutdown(state)
 
         # Checkout main before creating branch
         checkout_main(state.project_dir)
@@ -887,7 +988,7 @@ def run_orchestration(state: OrchestratorState) -> int:
     roadmap_content = read_roadmap(state)
 
     while state.cycle_count < state.max_cycles:
-        check_shutdown()
+        check_shutdown(state)
 
         state.cycle_count += 1
         logger.info(
@@ -921,7 +1022,12 @@ def run_orchestration(state: OrchestratorState) -> int:
         # 2. Parse PM signal
         pm_signal = parse_signal(pm_output)
         signal_type = pm_signal.get("signal", "unknown")
-        logger.info("PM signal: %s", signal_type)
+        signal_summary = pm_signal.get("summary", pm_signal.get("reason", ""))
+        logger.info(
+            "PM signal: %s%s",
+            signal_type,
+            f" -- {signal_summary}" if signal_summary else "",
+        )
 
         # 3. Handle PM signal
         if signal_type == "complete":
@@ -1002,7 +1108,7 @@ def run_orchestration(state: OrchestratorState) -> int:
                 return 1
 
             # 4. Execute sprints
-            check_shutdown()
+            check_shutdown(state)
             pl_results = execute_sprints(sprint_tasks, state)
 
             # Log PL results summary
@@ -1016,7 +1122,31 @@ def run_orchestration(state: OrchestratorState) -> int:
                 len(succeeded), len(failed),
             )
 
-            # 5. Re-read roadmap for next PM cycle
+            # 5. Merge successful sprint branches back to main
+            #    The orchestrator handles clean merges directly.
+            #    Conflicts are passed to PM in the next cycle for resolution.
+            for result in succeeded:
+                check_shutdown(state)
+                branch = result["sprint"].get("branch", "")
+                if not branch:
+                    continue
+
+                merge_ok, merge_details = merge_branch(branch, state.project_dir)
+                result["merge_success"] = merge_ok
+                result["merge_details"] = merge_details
+
+                if merge_ok:
+                    # Clean up the merged branch (non-blocking)
+                    delete_branch(branch, state.project_dir)
+                else:
+                    # Conflict -- downgrade result so PM sees it as needing attention
+                    logger.warning(
+                        "Merge conflict for sprint '%s': %s",
+                        result["sprint"].get("name", "unknown"), merge_details,
+                    )
+                    result["signal"]["merge_conflict"] = merge_details
+
+            # 6. Re-read roadmap for next PM cycle
             roadmap_content = read_roadmap(state)
 
         else:
