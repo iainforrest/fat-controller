@@ -136,9 +136,6 @@ def _handle_sigint(signum: int, frame: Any) -> None:
     logger.info("Received SIGINT -- shutting down gracefully after current operation")
 
 
-signal.signal(signal.SIGINT, _handle_sigint)
-
-
 def check_shutdown(state: Optional[OrchestratorState] = None) -> None:
     """Check if a graceful shutdown was requested and exit if so.
 
@@ -232,6 +229,8 @@ def _parse_simple_yaml(text: str) -> Dict[str, Any]:
         # Top-level key: value
         match = re.match(r'^(\s*)([\w_-]+)\s*:\s*(.*)', line)
         if not match:
+            if line.strip() and not line.strip().startswith('#'):
+                logger.debug("Skipping unparseable YAML line %d: %s", i, line.strip()[:100])
             i += 1
             continue
 
@@ -388,7 +387,7 @@ def _parse_scalar(value: str) -> Any:
         return False
 
     # null
-    if lower in ("null", "~", "none"):
+    if lower in ("null", "~"):
         return None
 
     # Numbers
@@ -550,8 +549,8 @@ def invoke_agent(
     """Invoke a Claude agent via CLI and capture stdout.
 
     Uses `claude --print --agent <name> -p <context>` to run the agent
-    non-interactively. Falls back to piping context via stdin if -p is
-    not supported.
+    non-interactively. Note: very large context strings may hit the OS
+    ARG_MAX limit; consider writing to a temp file if context exceeds ~128KB.
 
     Args:
         agent_name: Agent to invoke (e.g., "pm", "pl")
@@ -1027,64 +1026,20 @@ def execute_sprints(
     # Each PL will run `git checkout {branch}` during its boot sequence,
     # but concurrent checkouts on the same worktree cause race conditions.
     # For true parallel safety, this would need `git worktree add` per PL
-    # or separate cloned directories. Currently, parallel PLs may interfere
-    # with each other's branch state. In practice, PM should only mark
-    # sprints as parallel_safe when they are truly independent -- but even
-    # then, the shared worktree is a concurrency risk.
+    # or separate cloned directories.
     # TODO: Use git worktree for parallel PL isolation.
     if parallel:
-        logger.info("Launching %d parallel sprint(s)", len(parallel))
         logger.warning(
             "Parallel execution uses shared git worktree -- "
             "concurrent PLs may interfere with each other's branch state"
         )
-        processes: List[tuple] = []
-
-        for idx, sprint in enumerate(parallel):
-            check_shutdown(state)
-
-            # Checkout main before creating each branch
-            checkout_main(state.project_dir)
-            if not create_branch(sprint["branch"], state.project_dir):
-                results.append({
-                    "sprint": sprint,
-                    "signal": {
-                        "signal": "error",
-                        "error_type": "branch_creation_failed",
-                        "details": f"Failed to create branch {sprint['branch']}",
-                    },
-                })
-                continue
-
-            context = build_pl_context(sprint, state.project_dir)
-            proc = invoke_agent_async("pl", context, state.project_dir)
-            processes.append((sprint, proc))
-
-            # Rate-limit to avoid API throttling
-            if idx < len(parallel) - 1:
-                time.sleep(PARALLEL_LAUNCH_DELAY)
-
-        # Collect parallel results
-        for sprint, proc in processes:
-            try:
-                stdout, stderr = proc.communicate(timeout=state.pl_timeout)
-                sig = parse_signal(stdout or "")
-                results.append({"sprint": sprint, "signal": sig})
-                logger.info(
-                    "Parallel sprint '%s' signal: %s",
-                    sprint["name"], sig.get("signal", "unknown"),
-                )
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.communicate()
-                results.append({
-                    "sprint": sprint,
-                    "signal": {
-                        "signal": "error",
-                        "error_type": "timeout",
-                        "details": f"PL timed out after {state.pl_timeout}s",
-                    },
-                })
+        logger.info(
+            "Forcing sequential execution for %d parallel-marked sprint(s) "
+            "until git worktree isolation is implemented",
+            len(parallel),
+        )
+        sequential = parallel + sequential
+        parallel = []
 
     # --- Sequential sprints ---
     for sprint in sequential:
@@ -1468,6 +1423,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point. Returns exit code."""
+    signal.signal(signal.SIGINT, _handle_sigint)
+
     args = parse_args(argv)
 
     # Resolve project directory

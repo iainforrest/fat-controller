@@ -17,6 +17,14 @@ tasks/*/STATE-agent-*.md
 # Archive folder
 tasks/archive/
 
+# Log files
+tasks/*.log
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
 # Node.js
 node_modules/
 npm-debug.log*
