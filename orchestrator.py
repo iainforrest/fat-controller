@@ -1417,6 +1417,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help=f"Logging level (default: {DEFAULT_LOG_LEVEL})",
     )
+    parser.add_argument(
+        "--skip-values-check",
+        action="store_true",
+        default=False,
+        help="Skip interactive VALUES.md prompts (use when launched from /orchestrate command)",
+    )
 
     return parser.parse_args(argv)
 
@@ -1453,8 +1459,17 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # --- Pre-flight checks ---
 
-    # 1. VALUES.md graduated warning (NOT a hard gate)
-    if not check_values(state):
+    # 1. VALUES.md check
+    if args.skip_values_check:
+        # Launched from /orchestrate command -- it already handled the prompts
+        state.values_loaded = VALUES_PATH.is_file()
+        if state.values_loaded:
+            logger.info("Values profile loaded from %s", VALUES_PATH)
+        else:
+            logger.warning(
+                "RUNNING WITHOUT VALUES PROFILE -- agents operating in generic mode"
+            )
+    elif not check_values(state):
         return 0  # User chose to exit -- not an error
 
     # 2. OUTCOMES.md validation (hard requirement)
