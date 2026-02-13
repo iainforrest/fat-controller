@@ -129,27 +129,38 @@ tmux new-session -d -s orchestrator "python3 {ORCH} {project_dir} --skip-values-
 
 The `--skip-values-check` flag is used because we already handled the VALUES.md check above with better UX.
 
+### Verify launch
+
+After running the tmux command, verify it started:
+
+```bash
+tmux has-session -t orchestrator 2>/dev/null && echo "running" || echo "failed"
+```
+
+If it failed, check `tasks/orchestrator.log` for errors and report them.
+
 ### Confirmation
 
-After successful launch, respond with:
+After verifying the session is running, respond with:
 
 ```
-Orchestrator launched in tmux session "orchestrator".
+Orchestrator started successfully.
 
-The PM-PL cycle is now running autonomously:
-  PM plans sprints from your outcomes → PL executes them → PM reviews and plans next
+It's running in the background as a tmux session -- it will keep running even if you close this Claude Code session.
 
-Monitor:
-  tmux attach -t orchestrator     # Watch live output
-  tail -f tasks/orchestrator.log  # Follow the log file
+To view it from any terminal:
+  tmux attach -t orchestrator
 
-Stop:
-  tmux send-keys -t orchestrator C-c  # Graceful shutdown (saves state)
-  tmux kill-session -t orchestrator    # Force kill
+Other useful commands:
+  tail -f tasks/orchestrator.log                    # Follow the log without attaching
+  tmux send-keys -t orchestrator C-c                # Graceful shutdown (saves state)
+  tmux kill-session -t orchestrator                  # Force kill
 
-Resume after stop:
-  Run /orchestrate again -- the orchestrator reads ROADMAP.md and picks up where it left off.
+To resume after stopping:
+  Run /orchestrate again -- it reads ROADMAP.md and picks up where it left off.
 ```
+
+**IMPORTANT:** After displaying this message, remain in the Claude Code session. The user may want to continue working on other things while the orchestrator runs. Do NOT end the conversation or suggest closing the session.
 
 ---
 
@@ -158,3 +169,4 @@ Resume after stop:
 - If `tmux` is not installed: suggest `sudo apt install tmux` or fall back to running directly via Bash with `run_in_background: true`
 - If `python3` is not available: tell user Python 3 is required
 - If orchestrator.py is not found at any location: tell user to check their fat-controller installation
+- If tmux session fails to start: read `tasks/orchestrator.log` and report the error
