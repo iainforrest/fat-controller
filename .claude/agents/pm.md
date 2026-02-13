@@ -58,20 +58,27 @@ Read `tasks/ROADMAP.md` if it exists.
 - Log recovery decisions.
 - If recovery is not possible, signal `blocked` with details.
 
-### Step 4: Handle Resume Input (if PL summary provided)
+### Step 4: Handle Resume Input (if PL results provided)
 
-When receiving a Project Lead (PL) summary from a previous orchestrator cycle:
+When receiving PL results from a previous orchestrator cycle, the orchestrator has already handled git merges. Your job is to update ROADMAP.md and plan next steps based on the results.
 
-1. **Check PL signal type** (done / blocked / error).
-2. **If done**:
-   - Merge the PL's git branch to main: `git checkout main && git merge sprint/{sprint-name} --no-edit`
-   - If merge succeeds: update ROADMAP.md sprint status to `done` with completion timestamp and summary.
-   - If merge conflicts: update ROADMAP.md sprint status to `blocked` with conflict description. Create a conflict-resolution sprint targeting the same outcome.
-   - Delete the merged branch: `git branch -d sprint/{sprint-name}`
-3. **If blocked**:
+The orchestrator context includes merge status for each sprint:
+- `Merge: succeeded (branch merged and deleted)` -- the orchestrator merged and cleaned up.
+- `Merge: CONFLICT -- {details}` -- the orchestrator detected a conflict and aborted the merge. The branch is still intact.
+
+**Do NOT run git merge commands yourself.** The orchestrator handles all branch merges. You update ROADMAP.md and plan accordingly.
+
+For each sprint result:
+
+1. **If signal is `done` with successful merge**:
+   - Update ROADMAP.md sprint status to `done` with completion timestamp and summary.
+2. **If signal is `done` with merge conflict**:
+   - Update ROADMAP.md sprint status to `blocked` with conflict description from the orchestrator context.
+   - Create a conflict-resolution sprint targeting the same outcome. Include the conflicting files and branch change details from the orchestrator context.
+3. **If signal is `blocked`**:
    - Update ROADMAP.md sprint status to `blocked` with the blocker description from the PL signal.
    - Assess whether a fix sprint can resolve the blocker. If yes, create a fix sprint. If no (needs user input), signal `blocked` and pass through the PL's blocker details.
-4. **If error**:
+4. **If signal is `error`**:
    - Log error details in ROADMAP.md sprint entry.
    - Update sprint status to `blocked`.
    - Create a recovery sprint if the error is recoverable (e.g., retry with different approach). Otherwise, signal `blocked` with recovery suggestions.

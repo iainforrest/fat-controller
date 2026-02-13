@@ -1023,8 +1023,21 @@ def execute_sprints(
     results: List[Dict[str, Any]] = []
 
     # --- Parallel sprints ---
+    # KNOWN LIMITATION: Parallel PLs share the same git working directory.
+    # Each PL will run `git checkout {branch}` during its boot sequence,
+    # but concurrent checkouts on the same worktree cause race conditions.
+    # For true parallel safety, this would need `git worktree add` per PL
+    # or separate cloned directories. Currently, parallel PLs may interfere
+    # with each other's branch state. In practice, PM should only mark
+    # sprints as parallel_safe when they are truly independent -- but even
+    # then, the shared worktree is a concurrency risk.
+    # TODO: Use git worktree for parallel PL isolation.
     if parallel:
         logger.info("Launching %d parallel sprint(s)", len(parallel))
+        logger.warning(
+            "Parallel execution uses shared git worktree -- "
+            "concurrent PLs may interfere with each other's branch state"
+        )
         processes: List[tuple] = []
 
         for idx, sprint in enumerate(parallel):
