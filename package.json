@@ -32,6 +32,8 @@
     ".claude/**/*",
     "templates/.ai/**/*",
     "templates/tasks/.gitkeep",
+    "templates/ROADMAP.md",
+    "orchestrator.py",
     "INSTALL-NEW.md",
     "INSTALL-EXISTING.md",
     "README.md",
