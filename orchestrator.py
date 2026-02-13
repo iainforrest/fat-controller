@@ -698,11 +698,15 @@ def checkout_main(project_dir: Path) -> bool:
 
 
 def merge_branch(branch_name: str, project_dir: Path) -> tuple:
-    """Merge a sprint branch back to main.
+    """Merge a sprint branch back to main using a two-phase approach.
 
-    Checks out main first, then merges the sprint branch with --no-edit.
-    On conflict, aborts the merge and returns conflict details for PM
-    to create a conflict-resolution sprint.
+    Phase 1: Attempt merge with --no-commit to detect conflicts before
+    finalising. This lets us inspect the merge result and abort cleanly
+    if conflicts are found, without leaving a broken merge commit.
+
+    Phase 2: If no conflicts, finalise with git commit. If conflicts
+    are detected, abort and return rich conflict context for PM to
+    create a conflict-resolution sprint.
 
     Args:
         branch_name: The sprint branch to merge (e.g., "sprint/my-sprint")
@@ -710,46 +714,131 @@ def merge_branch(branch_name: str, project_dir: Path) -> tuple:
 
     Returns:
         Tuple of (success: bool, details: str). On conflict, details
-        contains the conflicting file list. On success, details is empty.
+        contains the conflicting files and per-branch change summaries.
+        On success, details is empty.
     """
     # Checkout main before merging
     if not checkout_main(project_dir):
         return (False, "Failed to checkout main branch before merge")
 
-    logger.info("Merging branch '%s' into main", branch_name)
+    logger.info("Merging branch '%s' into main (two-phase)", branch_name)
 
-    # Attempt the merge
+    # Phase 1: Attempt merge with --no-commit to detect conflicts
     result = git_run(
-        ["merge", branch_name, "--no-edit"], project_dir, check=False
+        ["merge", "--no-commit", "--no-ff", branch_name],
+        project_dir, check=False,
     )
 
-    if result.returncode == 0:
-        logger.info("Branch '%s' merged successfully", branch_name)
-        return (True, "")
-
-    # Merge failed -- check if it's a conflict
     stderr = result.stderr or ""
     stdout = result.stdout or ""
 
     if "CONFLICT" in stdout or "CONFLICT" in stderr:
-        # Collect conflict details before aborting
-        diff_result = git_run(["diff", "--name-only", "--diff-filter=U"], project_dir, check=False)
-        conflicting_files = diff_result.stdout.strip() if diff_result.stdout else "unknown"
+        # Conflict detected -- gather rich context before aborting
+        conflict_context = _build_conflict_context(
+            branch_name, project_dir
+        )
 
         # Abort the merge to leave the repo in a clean state
         git_run(["merge", "--abort"], project_dir, check=False)
 
-        conflict_details = (
-            f"Merge conflict in branch '{branch_name}'. "
-            f"Conflicting files: {conflicting_files}"
+        logger.warning(
+            "Merge conflict for branch '%s': %s",
+            branch_name, conflict_context,
         )
-        logger.warning(conflict_details)
-        return (False, conflict_details)
+        return (False, conflict_context)
 
-    # Non-conflict merge failure (e.g., branch not found, dirty working tree)
-    error_msg = f"Merge of '{branch_name}' failed: {stderr.strip() or stdout.strip()}"
-    logger.error(error_msg)
-    return (False, error_msg)
+    if result.returncode != 0:
+        # Non-conflict merge failure (e.g., branch not found, dirty tree)
+        # Abort any partial merge state just in case
+        git_run(["merge", "--abort"], project_dir, check=False)
+        error_msg = (
+            f"Merge of '{branch_name}' failed: "
+            f"{stderr.strip() or stdout.strip()}"
+        )
+        logger.error(error_msg)
+        return (False, error_msg)
+
+    # Phase 2: No conflicts -- finalise the merge commit
+    commit_result = git_run(
+        ["commit", "--no-edit", "-m",
+         f"Merge branch '{branch_name}' into main"],
+        project_dir, check=False,
+    )
+
+    if commit_result.returncode != 0:
+        # Edge case: nothing to commit (fast-forward or empty merge)
+        # This is still a success -- the merge was clean
+        logger.info(
+            "Merge commit note for '%s': %s",
+            branch_name,
+            (commit_result.stdout or commit_result.stderr or "").strip(),
+        )
+
+    logger.info("Branch '%s' merged successfully", branch_name)
+    return (True, "")
+
+
+def _build_conflict_context(
+    branch_name: str, project_dir: Path
+) -> str:
+    """Build rich conflict context for PM to create a resolution sprint.
+
+    Gathers:
+    - Which files have conflicts
+    - What the sprint branch changed (diff summary vs main)
+    - What main changed since the branch diverged
+
+    This context is passed to PM so it can create an informed
+    conflict-resolution sprint without the orchestrator attempting
+    to resolve conflicts itself.
+    """
+    # Get list of conflicting files
+    diff_result = git_run(
+        ["diff", "--name-only", "--diff-filter=U"],
+        project_dir, check=False,
+    )
+    conflicting_files = (
+        diff_result.stdout.strip() if diff_result.stdout else "unknown"
+    )
+
+    # Get what the sprint branch changed relative to merge-base
+    # (shows only the sprint's contributions, not main's changes)
+    merge_base = git_run(
+        ["merge-base", "HEAD", branch_name],
+        project_dir, check=False,
+    )
+    branch_changes = ""
+    main_changes = ""
+
+    if merge_base.returncode == 0:
+        base_sha = merge_base.stdout.strip()
+
+        # Sprint branch changes since divergence
+        branch_diff = git_run(
+            ["diff", "--stat", base_sha, branch_name],
+            project_dir, check=False,
+        )
+        if branch_diff.returncode == 0 and branch_diff.stdout:
+            branch_changes = branch_diff.stdout.strip()
+
+        # Main branch changes since divergence
+        main_diff = git_run(
+            ["diff", "--stat", base_sha, "HEAD"],
+            project_dir, check=False,
+        )
+        if main_diff.returncode == 0 and main_diff.stdout:
+            main_changes = main_diff.stdout.strip()
+
+    parts = [
+        f"Merge conflict in branch '{branch_name}'.",
+        f"Conflicting files: {conflicting_files}",
+    ]
+    if branch_changes:
+        parts.append(f"Branch '{branch_name}' changes:\n{branch_changes}")
+    if main_changes:
+        parts.append(f"Main branch changes since divergence:\n{main_changes}")
+
+    return "\n".join(parts)
 
 
 def delete_branch(branch_name: str, project_dir: Path) -> bool:
@@ -789,7 +878,12 @@ def build_pm_context(
     pl_results: Optional[List[Dict[str, Any]]] = None,
     roadmap_content: Optional[str] = None,
 ) -> str:
-    """Build the context string passed to the PM agent."""
+    """Build the context string passed to the PM agent.
+
+    When PL results are provided, categorizes them into succeeded/failed
+    groups so PM has a clear picture and can decide recovery strategy
+    for any failed sprints (retry, fix sprint, mark blocked).
+    """
     parts = [
         f"PROJECT_DIR: {state.project_dir}",
         f"OUTCOMES_PATH: {state.outcomes_path}",
@@ -802,27 +896,101 @@ def build_pm_context(
         parts.append(f"\n--- CURRENT ROADMAP ---\n{roadmap_content}\n--- END ROADMAP ---")
 
     if pl_results:
+        # Categorize results so PM gets a structured view
+        categorized = categorize_sprint_results(pl_results)
+
         parts.append("\n--- PL RESULTS FROM PREVIOUS CYCLE ---")
-        for pr in pl_results:
-            sprint = pr.get("sprint", {})
-            sig = pr.get("signal", {})
-            merge_info = ""
-            if pr.get("merge_success") is True:
-                merge_info = "\n  Merge: succeeded (branch merged and deleted)"
-            elif pr.get("merge_success") is False:
-                merge_info = (
-                    f"\n  Merge: CONFLICT -- {pr.get('merge_details', 'unknown')}"
-                    "\n  Action needed: create conflict-resolution sprint or manual merge"
-                )
-            parts.append(
-                f"Sprint: {sprint.get('name', 'unknown')}\n"
-                f"  Signal: {sig.get('signal', 'unknown')}\n"
-                f"  Summary: {sig.get('summary', sig.get('details', sig.get('blocker_description', 'N/A')))}"
-                f"{merge_info}"
-            )
+        parts.append(f"Overall: {categorized['summary']}")
+
+        # Succeeded sprints (with merge status)
+        if categorized["succeeded"]:
+            parts.append("\nSUCCEEDED SPRINTS:")
+            for pr in categorized["succeeded"]:
+                parts.append(_format_pl_result(pr))
+
+        # Failed sprints -- PM decides recovery strategy
+        if categorized["failed"]:
+            parts.append("\nFAILED SPRINTS (PM decides: retry, fix sprint, or mark blocked):")
+            for pr in categorized["failed"]:
+                parts.append(_format_pl_result(pr))
+
+        # Unknown signal types -- PM should investigate
+        if categorized["unknown"]:
+            parts.append("\nUNKNOWN SIGNAL SPRINTS (unexpected signal type):")
+            for pr in categorized["unknown"]:
+                parts.append(_format_pl_result(pr))
+
         parts.append("--- END PL RESULTS ---")
 
     return "\n".join(parts)
+
+
+def _format_pl_result(pr: Dict[str, Any]) -> str:
+    """Format a single PL result for PM context.
+
+    Includes sprint name, signal type, summary/details, and merge
+    status when available. Provides enough context for PM to make
+    informed recovery or progression decisions.
+    """
+    sprint = pr.get("sprint", {})
+    sig = pr.get("signal", {})
+    sig_type = sig.get("signal", "unknown")
+
+    lines = [
+        f"  Sprint: {sprint.get('name', 'unknown')}",
+        f"    Branch: {sprint.get('branch', 'unknown')}",
+        f"    Signal: {sig_type}",
+    ]
+
+    # Add signal-type-specific details
+    if sig_type == "done":
+        lines.append(
+            f"    Summary: {sig.get('summary', 'N/A')}"
+        )
+        tasks_info = ""
+        if "tasks_completed" in sig and "tasks_total" in sig:
+            tasks_info = f" ({sig['tasks_completed']}/{sig['tasks_total']} tasks)"
+        if tasks_info:
+            lines.append(f"    Progress:{tasks_info}")
+
+    elif sig_type == "blocked":
+        lines.append(
+            f"    Blocker: {sig.get('blocker_description', sig.get('details', 'N/A'))}"
+        )
+        if "tasks_completed" in sig and "tasks_total" in sig:
+            lines.append(
+                f"    Progress: {sig['tasks_completed']}/{sig['tasks_total']} tasks"
+            )
+
+    elif sig_type == "error":
+        lines.append(
+            f"    Error type: {sig.get('error_type', 'unknown')}"
+        )
+        lines.append(
+            f"    Details: {sig.get('details', 'N/A')}"
+        )
+
+    else:
+        # Unknown signal type -- dump what we have
+        summary = sig.get("summary", sig.get("details", "N/A"))
+        lines.append(f"    Details: {summary}")
+
+    # Merge status (only present for succeeded sprints that were merged)
+    if pr.get("merge_success") is True:
+        lines.append("    Merge: succeeded (branch merged and deleted)")
+    elif pr.get("merge_success") is False:
+        lines.append(
+            f"    Merge: CONFLICT -- {pr.get('merge_details', 'unknown')}"
+        )
+        lines.append(
+            "    Action needed: create conflict-resolution sprint"
+        )
+
+    # Merge conflict attached to signal (from sequential merge failures)
+    if sig.get("merge_conflict"):
+        lines.append(f"    Merge conflict: {sig['merge_conflict']}")
+
+    return "\n".join(lines)
 
 
 def build_pl_context(sprint: Dict[str, Any], project_dir: Path) -> str:
@@ -951,6 +1119,57 @@ def execute_sprints(
     checkout_main(state.project_dir)
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Sprint result categorization
+# ---------------------------------------------------------------------------
+
+def categorize_sprint_results(
+    results: List[Dict[str, Any]],
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Categorize sprint results into succeeded, failed, and unknown.
+
+    Used after execute_sprints() to give PM a clear picture of what
+    happened. PM decides recovery strategy -- the orchestrator does NOT
+    make recovery decisions itself.
+
+    Args:
+        results: List of result dicts from execute_sprints(), each with
+                 'sprint' and 'signal' keys.
+
+    Returns:
+        Dict with keys:
+        - 'succeeded': sprints with signal 'done'
+        - 'failed': sprints with signal 'error' or 'blocked'
+        - 'unknown': sprints with unrecognised signal types
+        - 'summary': human-readable one-line summary
+    """
+    succeeded: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    unknown: List[Dict[str, Any]] = []
+
+    for result in results:
+        sig_type = result.get("signal", {}).get("signal", "unknown")
+        if sig_type == "done":
+            succeeded.append(result)
+        elif sig_type in ("error", "blocked"):
+            failed.append(result)
+        else:
+            unknown.append(result)
+
+    summary = (
+        f"{len(succeeded)} succeeded, {len(failed)} failed"
+        f"{f', {len(unknown)} unknown' if unknown else ''}"
+        f" (of {len(results)} total)"
+    )
+
+    return {
+        "succeeded": succeeded,
+        "failed": failed,
+        "unknown": unknown,
+        "summary": summary,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1111,21 +1330,31 @@ def run_orchestration(state: OrchestratorState) -> int:
             check_shutdown(state)
             pl_results = execute_sprints(sprint_tasks, state)
 
-            # Log PL results summary
-            succeeded = [r for r in pl_results if r["signal"].get("signal") == "done"]
-            failed = [
-                r for r in pl_results
-                if r["signal"].get("signal") in ("error", "blocked")
-            ]
-            logger.info(
-                "Sprint execution: %d succeeded, %d failed",
-                len(succeeded), len(failed),
-            )
+            # 5. Categorize results for logging and PM context
+            #    PM receives ALL results (succeeded + failed + unknown)
+            #    and decides recovery strategy for failures.
+            categorized = categorize_sprint_results(pl_results)
+            logger.info("Sprint execution: %s", categorized["summary"])
 
-            # 5. Merge successful sprint branches back to main
+            if categorized["failed"]:
+                for fr in categorized["failed"]:
+                    sprint_name = fr.get("sprint", {}).get("name", "unknown")
+                    sig = fr.get("signal", {})
+                    logger.warning(
+                        "Failed sprint '%s': %s -- %s",
+                        sprint_name,
+                        sig.get("signal", "unknown"),
+                        sig.get("details", sig.get("blocker_description", "no details")),
+                    )
+
+            # 6. Merge successful sprint branches back to main
             #    The orchestrator handles clean merges directly.
-            #    Conflicts are passed to PM in the next cycle for resolution.
-            for result in succeeded:
+            #    Conflicts are passed to PM in the next cycle for
+            #    resolution via a conflict-resolution sprint.
+            #    Sequential merge order: if A merges cleanly, proceed
+            #    to B; if B conflicts after A was merged, pass the
+            #    conflict context to PM.
+            for result in categorized["succeeded"]:
                 check_shutdown(state)
                 branch = result["sprint"].get("branch", "")
                 if not branch:
@@ -1139,14 +1368,15 @@ def run_orchestration(state: OrchestratorState) -> int:
                     # Clean up the merged branch (non-blocking)
                     delete_branch(branch, state.project_dir)
                 else:
-                    # Conflict -- downgrade result so PM sees it as needing attention
+                    # Conflict -- tag result so PM sees it needs attention.
+                    # PM will create a conflict-resolution sprint.
                     logger.warning(
                         "Merge conflict for sprint '%s': %s",
                         result["sprint"].get("name", "unknown"), merge_details,
                     )
                     result["signal"]["merge_conflict"] = merge_details
 
-            # 6. Re-read roadmap for next PM cycle
+            # 7. Re-read roadmap for next PM cycle
             roadmap_content = read_roadmap(state)
 
         else:
