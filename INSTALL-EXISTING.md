@@ -365,6 +365,14 @@ Does this look accurate? Anything I missed or got wrong?
 
 ---
 
+## Optional: Values Discovery
+
+If you plan to use the autonomous orchestrator (`orchestrator.py`), we recommend running `/values-discovery` to create a personal values profile at `~/.claude/VALUES.md`. This enables values-driven agent decisions -- the autonomous PM and PL agents will make planning and execution choices aligned with your principles.
+
+This is not required for standard Fat Controller usage. The command flow (`/prd`, `/TaskGen`, `/execute`, `/commit`) works without it.
+
+---
+
 ## Error Handling
 
 **If exploration gets stuck:**

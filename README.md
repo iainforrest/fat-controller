@@ -108,6 +108,38 @@ Then run the appropriate installer with Claude Code.
 /push-fc               → Push improvements back as PR
 ```
 
+## Autonomous Orchestrator
+
+Fat-controller works out of the box with the command flow above. The autonomous orchestrator takes it further -- it runs the full plan-execute-commit cycle without manual intervention.
+
+For the autonomous orchestrator, we strongly recommend running `/values-discovery` first. It ensures the autonomous agents make decisions you'd recognise as your own.
+
+### Two Tiers
+
+**Standard flow** (works without values):
+```
+Install → Project bootstrap → /prd → /TaskGen → /execute → /commit
+```
+
+**Autonomous flow** (strongly recommended with values):
+```
+Install → /values-discovery → Project bootstrap → python3 orchestrator.py .
+```
+
+The autonomous orchestrator reads your `tasks/OUTCOMES.md`, plans sprints via a PM agent, executes them via a PL agent, and loops until all outcomes are delivered. Values-discovery is optional but strongly recommended -- without it, agents operate with generic professional judgment instead of your personal principles.
+
+### Key Components
+
+| Component | Purpose |
+|-----------|---------|
+| `orchestrator.py` | Python loop that drives PM/PL cycles |
+| `.claude/agents/pm.md` | Plans sprints, writes PRDs, manages the roadmap |
+| `.claude/agents/pl.md` | Executes sprints via TaskGen and Execute |
+| `tasks/ROADMAP.md` | Sprint state tracking (created automatically) |
+| `/values-discovery` | Optional: creates `~/.claude/VALUES.md` for values-driven agents |
+
+---
+
 ## Commands Reference
 
 | Command | Purpose | Output |
