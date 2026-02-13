@@ -51,6 +51,9 @@ Find the right pattern for your task:
 | Dual-model code review | Parallel Model Orchestration | (below) |
 | Downstream effects analysis | Downstream Effects Pattern | (below) |
 | Multi-model debate | Debate Orchestration Pattern | (below) |
+| Autonomous PM-PL cycles | Autonomous Orchestration Pattern | (below) |
+| Values-driven agent boot | Values-Driven Agent Boot Pattern | (below) |
+| Structured agent signals | Structured Output Protocol | (below) |
 
 *Table expands as you add patterns. Update when adding new domain files.*
 
@@ -557,6 +560,252 @@ FOR each finding in findings:
 - **Verify command fails**: Re-run fix agent with failure context
 
 **Reference**: `.claude/commands/execute.md` (post-execution steps), `.claude/agents/cto.md`
+
+---
+
+## Built-in Pattern: Autonomous Orchestration
+
+Python orchestrator drives PM-PL cycles for autonomous project execution.
+
+### When to Use
+- Multi-sprint projects with defined outcomes
+- Want autonomous progress without human intervention
+- Need structured state tracking across sprints
+- Want parallel sprint execution for independent work
+
+### Pattern Structure
+```
+orchestrator.py (Python, stdlib-only)
+    ↓
+Read ROADMAP.md (sprint state)
+    ↓
+Invoke PM agent (claude --print --agent pm)
+    ↓
+PM signals next_task or parallel_tasks
+    ↓
+For each sprint:
+    - Create git branch sprint/{sprint-name}
+    - Invoke PL agent (claude --print --agent pl)
+    - PL: TaskGen → Execute → commit → merge
+    - PL signals sprint_result (success/error)
+    - Update ROADMAP.md with status
+    ↓
+Loop until PM signals completed or blocked
+```
+
+### Key Components
+
+**orchestrator.py:**
+- Python 3 stdlib only (no pip dependencies)
+- Filesystem is truth, sessions are disposable
+- Structured signal parsing (YAML blocks)
+- Git branch management per sprint
+- Parallel PL execution for independent sprints
+- Two-phase merge (--no-commit, then commit or abort)
+
+**PM Agent (.claude/agents/pm.md):**
+- Plans sprints from OUTCOMES.md and ROADMAP.md
+- Writes just-in-time PRDs
+- Outputs structured signals (next_task, parallel_tasks, completed, blocked, halt)
+- Values-driven planning decisions
+
+**PL Agent (.claude/agents/pl.md):**
+- Executes sprints on git branches
+- Runs TaskGen → Execute → commits
+- Outputs sprint_result signals
+- Values-driven execution decisions
+
+**ROADMAP.md (tasks/ROADMAP.md):**
+- Single source of truth for sprint state
+- Fields: sprint name, target outcome, status, PRD path, branch, summary
+- Updated by PM and orchestrator
+
+### Implementation Checklist
+- [ ] Create tasks/OUTCOMES.md defining project outcomes
+- [ ] Run orchestrator: `python3 orchestrator.py /path/to/project`
+- [ ] Orchestrator checks for VALUES.md (graduated warning if missing)
+- [ ] PM creates/updates ROADMAP.md with sprint plan
+- [ ] PM signals next sprint(s) to execute
+- [ ] Orchestrator creates sprint/* branches
+- [ ] PL executes sprints, commits code, signals results
+- [ ] Orchestrator updates ROADMAP.md with status
+- [ ] Loop continues until PM signals completed or blocked
+
+### Error Handling
+- **PM signal parse failure**: Retry once, then halt with error
+- **PL execution failure**: Mark sprint as blocked, continue to next sprint
+- **Git merge conflict**: Abort merge, mark sprint as blocked, notify user
+- **Stuck detection**: Same sprint name 3 times in sequence → halt
+- **SIGINT (Ctrl+C)**: Graceful shutdown, preserve state in ROADMAP.md
+
+### Graduated Warning Flow (VALUES.md)
+```
+orchestrator.py startup:
+  ├─ Check ~/.claude/VALUES.md exists
+  │
+  ├─ If missing:
+  │   ├─ Warn: "VALUES.md not found. Agents will use generic mode."
+  │   ├─ Recommend: "Run /values-discovery to create personalized values profile."
+  │   ├─ Prompt: "Continue without values? (y/n)"
+  │   │   ├─ No → Exit
+  │   │   └─ Yes → Confirm: "Agents will use conservative generic judgments. Proceed? (y/n)"
+  │   │       ├─ No → Exit
+  │   │       └─ Yes → Proceed in generic mode
+  │   └─
+  └─ If found: Load and proceed
+```
+
+**Reference**: `orchestrator.py`, `.claude/agents/pm.md`, `.claude/agents/pl.md`, `templates/ROADMAP.md`
+
+---
+
+## Built-in Pattern: Values-Driven Agent Boot
+
+Agents load ~/.claude/VALUES.md for personalized decision-making, gracefully degrade if missing.
+
+### When to Use
+- Agent needs to make value-driven decisions (priorities, trade-offs, quality thresholds)
+- Want personalized behavior aligned to user's values
+- Need graceful degradation if values not available
+
+### Pattern Structure
+```yaml
+# In agent frontmatter or Boot Sequence section
+
+## Boot Sequence
+
+### Step 1: Load Values
+
+Read ~/.claude/VALUES.md if it exists.
+
+- **If found**: These are your values -- not guidelines to consider, but how you think and decide. Apply them to all decisions: what to prioritize, how to sequence work, quality vs speed trade-offs, when to flag uncertainty, and what "done" means.
+- **If NOT found**: Log WARNING. Operating in generic mode. Make conservative decisions. Lower confidence threshold (~60% vs ~70%). Do NOT refuse to work -- the user has chosen to proceed without values.
+
+**IMPORTANT**: Missing VALUES.md is NOT a blocker. The orchestrator has already warned the user and received consent to proceed. You note it and continue in generic mode.
+```
+
+### Generic Mode Behavior
+- Use conservative professional judgment
+- Escalate more frequently (lower confidence threshold to ~60% instead of ~70%)
+- Prefer correctness over speed when ambiguous
+- Prefer doing less well over doing more poorly
+- Note in first output: "Operating without values profile -- recommend running /values-discovery"
+
+### Implementation Checklist
+- [ ] Add "Load Values" step to agent boot sequence
+- [ ] Check if ~/.claude/VALUES.md exists
+- [ ] If found: load values, adopt decision framework
+- [ ] If NOT found: log WARNING, switch to generic mode
+- [ ] Do NOT block or refuse to work if missing
+- [ ] Apply values (or generic mode) to all decision points
+
+### Error Handling
+- **VALUES.md corrupt/unparseable**: Log warning, fall back to generic mode
+- **VALUES.md exists but empty**: Treat as missing, use generic mode
+- **User cancels values-discovery**: Continue in generic mode (no retry loop)
+
+**Reference**: `.claude/agents/cto.md`, `.claude/agents/pm.md`, `.claude/agents/pl.md`
+
+---
+
+## Built-in Pattern: Structured Output Protocol
+
+Agents output YAML signal blocks between ---ORCHESTRATOR_SIGNAL--- markers for reliable machine parsing.
+
+### When to Use
+- Orchestrator needs to parse agent output programmatically
+- Need reliable control flow between orchestrator and agents
+- Want structured error handling and blocking conditions
+- Supporting parallel task execution
+
+### Signal Format
+```yaml
+---ORCHESTRATOR_SIGNAL---
+action: next_task | parallel_tasks | completed | blocked | halt | sprint_result
+# ... action-specific fields
+---ORCHESTRATOR_SIGNAL---
+```
+
+### PM Agent Signals
+
+**next_task** (single sprint):
+```yaml
+---ORCHESTRATOR_SIGNAL---
+action: next_task
+sprint_name: "auth-service"
+target_outcome: "User Authentication"
+prd_path: "tasks/prd-auth-service.md"
+branch: "sprint/auth-service"
+---ORCHESTRATOR_SIGNAL---
+```
+
+**parallel_tasks** (multiple independent sprints):
+```yaml
+---ORCHESTRATOR_SIGNAL---
+action: parallel_tasks
+sprints:
+  - sprint_name: "api-layer"
+    target_outcome: "API Foundation"
+    prd_path: "tasks/prd-api-layer.md"
+    branch: "sprint/api-layer"
+  - sprint_name: "db-schema"
+    target_outcome: "Data Persistence"
+    prd_path: "tasks/prd-db-schema.md"
+    branch: "sprint/db-schema"
+---ORCHESTRATOR_SIGNAL---
+```
+
+**completed** (all work done):
+```yaml
+---ORCHESTRATOR_SIGNAL---
+action: completed
+message: "All outcomes achieved. Project complete."
+---ORCHESTRATOR_SIGNAL---
+```
+
+**blocked** (cannot proceed):
+```yaml
+---ORCHESTRATOR_SIGNAL---
+action: blocked
+reason: "OUTCOMES.md missing critical acceptance criteria for outcome 3."
+needs: "User input to clarify success criteria."
+---ORCHESTRATOR_SIGNAL---
+```
+
+**halt** (graceful shutdown):
+```yaml
+---ORCHESTRATOR_SIGNAL---
+action: halt
+reason: "User requested shutdown."
+---ORCHESTRATOR_SIGNAL---
+```
+
+### PL Agent Signals
+
+**sprint_result** (sprint execution complete):
+```yaml
+---ORCHESTRATOR_SIGNAL---
+action: sprint_result
+status: success | error
+summary: "Sprint completed: auth service implemented, 15 tests passing, merged to main."
+---ORCHESTRATOR_SIGNAL---
+```
+
+### Implementation Checklist
+- [ ] Define signal schema for orchestrator and agents
+- [ ] Agents output YAML between ---ORCHESTRATOR_SIGNAL--- markers
+- [ ] Orchestrator parses signals with regex extraction
+- [ ] Validate required fields present
+- [ ] Handle parse failures (retry once, then halt)
+- [ ] Log all signals to orchestrator.log
+
+### Error Handling
+- **Signal missing**: Treat as error, retry agent call once
+- **Signal malformed YAML**: Log parse error, retry once, then halt
+- **Signal missing required fields**: Log validation error, halt
+- **Multiple signals in one output**: Use first valid signal, warn about duplicates
+
+**Reference**: `orchestrator.py`, `.claude/agents/pm.md`, `.claude/agents/pl.md`
 
 ---
 

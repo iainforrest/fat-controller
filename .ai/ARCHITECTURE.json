@@ -1,8 +1,8 @@
 {
   "meta": {
     "projectName": "fat-controller",
-    "version": "3.1.2",
-    "lastUpdated": "2026-02-02",
+    "version": "3.3.0",
+    "lastUpdated": "2026-02-14",
     "description": "Architecture patterns, data flows, and component relationships"
   },
   "corePatterns": {
@@ -129,6 +129,54 @@
         "Source attribution in TECH_DEBT.md tracks which model flagged issue"
       ]
     },
+    "autonomousOrchestration": {
+      "description": "Python orchestrator drives PM-PL autonomous execution cycles",
+      "keyFiles": ["orchestrator.py", ".claude/agents/pm.md", ".claude/agents/pl.md", "templates/ROADMAP.md"],
+      "constraints": [
+        "Python 3 stdlib only (no pip dependencies)",
+        "Filesystem is truth, sessions are disposable",
+        "PM plans, PL executes, orchestrator loops",
+        "YAML signals between ---ORCHESTRATOR_SIGNAL--- markers"
+      ],
+      "benefits": [
+        "Autonomous PM-PL cycles without human intervention",
+        "Structured state tracking in ROADMAP.md",
+        "Parallel PL execution for independent sprints",
+        "VALUES.md driven with graduated warning (not gate)",
+        "Git branch per sprint with merge conflict handling"
+      ]
+    },
+    "valuesDrivenAgentBoot": {
+      "description": "Agents load ~/.claude/VALUES.md for decision-making, gracefully degrade if missing",
+      "keyFiles": [".claude/agents/cto.md", ".claude/agents/pm.md", ".claude/agents/pl.md"],
+      "constraints": [
+        "VALUES.md is recommended but NOT required",
+        "Graduated warning flow: check → recommend → confirm → confirm again → proceed",
+        "Generic mode: conservative judgments, lower confidence threshold (~60% vs ~70%)"
+      ],
+      "benefits": [
+        "Personalized decision-making aligned to user values",
+        "Graceful degradation if VALUES.md missing",
+        "No gatekeeping: user can proceed without values if desired",
+        "Agents adapt behavior based on values presence"
+      ]
+    },
+    "structuredOutputProtocol": {
+      "description": "Agents output YAML signal blocks between ---ORCHESTRATOR_SIGNAL--- markers for orchestrator parsing",
+      "keyFiles": ["orchestrator.py", ".claude/agents/pm.md", ".claude/agents/pl.md"],
+      "constraints": [
+        "Signal format: YAML between ---ORCHESTRATOR_SIGNAL--- markers",
+        "Required fields: action (next_task, resume, completed, blocked, halt)",
+        "PM signals: next_task, parallel_tasks, completed, blocked, halt",
+        "PL signals: sprint_result with success/error status"
+      ],
+      "benefits": [
+        "Reliable machine-parseable agent output",
+        "Clear orchestrator control flow",
+        "Structured error handling and blocking conditions",
+        "Supports parallel task execution"
+      ]
+    },
     "_example": {
       "description": "Example: How services/managers are structured",
       "keyFiles": ["services/ExampleService.ext"],
@@ -219,6 +267,47 @@
         "debates/{topic-slug}/debate.md"
       ],
       "dataModel": "Topic → Brief → 3 rounds (independent + cross-exam) → Synthesis → Actionable recommendations"
+    },
+    "autonomousOrchestratorFlow": {
+      "name": "Autonomous PM-PL execution cycle with git branch management and parallel execution",
+      "steps": [
+        "Orchestrator reads tasks/ROADMAP.md (sprint state)",
+        "Invoke PM agent (claude --print --agent pm) to plan next sprint(s)",
+        "PM signals next_task or parallel_tasks with sprint details",
+        "Orchestrator creates git branch sprint/{sprint-name}",
+        "Invoke PL agent (claude --print --agent pl) on branch with sprint PRD",
+        "PL runs TaskGen → Execute → commits code → merges to main",
+        "PL signals sprint_result (success/error) with summary",
+        "Orchestrator updates ROADMAP.md with sprint status",
+        "Loop: repeat PM → PL cycle until PM signals completed or blocked"
+      ],
+      "keyFiles": [
+        "orchestrator.py",
+        ".claude/agents/pm.md",
+        ".claude/agents/pl.md",
+        "tasks/ROADMAP.md",
+        "tasks/OUTCOMES.md"
+      ],
+      "dataModel": "SprintState (name, target_outcome, status, prd_path, branch, pl_summary)"
+    },
+    "valuesDrivenBootFlow": {
+      "name": "Values loading with graduated warning and graceful degradation",
+      "steps": [
+        "Agent starts, reads ~/.claude/VALUES.md",
+        "If found: load values, adopt decision framework",
+        "If NOT found: log WARNING, switch to generic mode",
+        "Generic mode: conservative judgments, lower confidence threshold (~60%)",
+        "Agent proceeds with work (no blocking gate)",
+        "User sees warning on first run, can run /values-discovery if desired"
+      ],
+      "keyFiles": [
+        ".claude/agents/cto.md",
+        ".claude/agents/pm.md",
+        ".claude/agents/pl.md",
+        ".claude/commands/values-discovery.md",
+        ".claude/commands/domain-values.md"
+      ],
+      "dataModel": "VALUES.md (optional, user-specific values profile)"
     },
     "_example": {
       "name": "User authentication flow",

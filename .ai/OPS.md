@@ -38,6 +38,12 @@
 
 # Clean build
 [CLEAN_BUILD]                # e.g., "npm run clean && npm run build"
+
+# Autonomous Orchestrator
+python3 orchestrator.py /path/to/project [--max-cycles 50] [--log-level INFO]
+# Drives autonomous PM-PL cycles
+# Logs to .claude-orchestrator/orchestrator.log
+# Ctrl+C for graceful shutdown
 ```
 
 ---
@@ -219,6 +225,89 @@ When you discover a new operational procedure, add it here using this format:
 **Validation**: [How to verify success]
 
 **Rollback**: [How to undo if needed]
+
+---
+
+---
+
+## Orchestrator Operations
+
+### Running the Orchestrator
+
+**Start orchestrator:**
+```bash
+cd /path/to/project
+python3 orchestrator.py . --max-cycles 50 --log-level INFO
+```
+
+**Prerequisites:**
+- [ ] tasks/OUTCOMES.md exists with defined outcomes
+- [ ] ~/.claude/VALUES.md exists (recommended, not required)
+- [ ] Git working directory clean (no uncommitted changes)
+- [ ] Git remote configured (for push operations)
+
+**Orchestrator will:**
+1. Check for VALUES.md (graduated warning if missing, user can proceed)
+2. Read or create tasks/ROADMAP.md
+3. Invoke PM agent to plan next sprint(s)
+4. Create sprint/* git branches
+5. Invoke PL agent(s) to execute sprint(s)
+6. Merge completed sprints to main
+7. Update ROADMAP.md with status
+8. Loop until PM signals completed or blocked
+
+**Logs:**
+- Structured logs: `.claude-orchestrator/orchestrator.log`
+- Stderr: Human-friendly progress messages
+
+**Graceful Shutdown:**
+- Press Ctrl+C once: graceful shutdown, preserves state in ROADMAP.md
+- Press Ctrl+C twice: immediate exit (may leave state inconsistent)
+
+### Resuming After Stop
+
+The orchestrator is stateless. Resume by re-running:
+```bash
+python3 orchestrator.py /path/to/project
+```
+
+Orchestrator reads ROADMAP.md to determine where to resume:
+- Sprints with status `backlog`: not started, eligible for execution
+- Sprints with status `in_progress`: were interrupted, PM will assess
+- Sprints with status `done`: completed, skip
+- Sprints with status `blocked`: require user intervention
+
+### Common Issues
+
+#### Issue: PM signals "blocked" - OUTCOMES.md missing
+**Symptoms**: Orchestrator halts immediately after PM invocation
+**Resolution**:
+1. Create tasks/OUTCOMES.md with project outcomes
+2. Use template or run /outcomes command
+3. Re-run orchestrator
+
+#### Issue: PL execution fails - git merge conflict
+**Symptoms**: Orchestrator logs "Merge conflict detected, aborting merge"
+**Resolution**:
+1. Check `.claude-orchestrator/orchestrator.log` for conflict details
+2. Manually resolve conflict on sprint/* branch
+3. Update ROADMAP.md: change sprint status from `in_progress` to `done` or `blocked`
+4. Re-run orchestrator (PM will assess state)
+
+#### Issue: Stuck detection - same sprint loops
+**Symptoms**: "Stuck detection: sprint 'X' attempted 3 times, halting"
+**Resolution**:
+1. Check ROADMAP.md for sprint definition issues
+2. Check sprint PRD for clarity/feasibility
+3. Fix sprint definition or mark as blocked
+4. Re-run orchestrator
+
+#### Issue: VALUES.md missing warning
+**Symptoms**: Orchestrator warns "VALUES.md not found" at startup
+**Resolution (optional)**:
+1. Run /values-discovery command to create VALUES.md
+2. Or proceed in generic mode (agents use conservative judgments)
+3. VALUES.md is recommended but NOT required
 
 ---
 

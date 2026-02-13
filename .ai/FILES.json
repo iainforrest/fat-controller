@@ -1,8 +1,8 @@
 {
   "meta": {
     "projectName": "fat-controller",
-    "lastUpdated": "2026-02-10",
-    "totalFiles": 36,
+    "lastUpdated": "2026-02-14",
+    "totalFiles": 44,
     "description": "Smart file index with cross-references and quick navigation",
     "lineNumberPolicy": "Use globs or directories instead of file:line references."
   },
@@ -21,7 +21,9 @@
         ".claude/commands/feature.md",
         ".claude/commands/code-review.md",
         ".claude/commands/debate.md",
-        ".claude/commands/drift-report.md"
+        ".claude/commands/drift-report.md",
+        ".claude/commands/values-discovery.md",
+        ".claude/commands/domain-values.md"
       ]
     },
     "agents": {
@@ -30,7 +32,9 @@
         ".claude/agents/task-writer.md",
         ".claude/agents/update-memory-agent.md",
         ".claude/agents/code-review-agent.md",
-        ".claude/agents/cto.md"
+        ".claude/agents/cto.md",
+        ".claude/agents/pm.md",
+        ".claude/agents/pl.md"
       ],
       "support": [
         ".claude/agents/cto-technical-advisor.md",
@@ -86,7 +90,18 @@
     },
     "projectBootstrap": {
       "install": ["install.js", "package.json"],
-      "templates": ["templates/.ai/*", "templates/tasks/.gitkeep"]
+      "templates": [
+        "templates/.ai/*",
+        "templates/tasks/.gitkeep",
+        "templates/ROADMAP.md",
+        "templates/CLAUDE.md"
+      ]
+    },
+    "orchestration": {
+      "orchestrator": ["orchestrator.py"],
+      "agents": [".claude/agents/pm.md", ".claude/agents/pl.md"],
+      "stateFiles": ["tasks/ROADMAP.md", "tasks/OUTCOMES.md"],
+      "templates": ["templates/ROADMAP.md"]
     }
   },
   "byLayer": {
@@ -171,6 +186,32 @@
       },
       "jsonSchema": "Standardized output format for dual-model review",
       "fields": ["id", "severity", "category", "location", "issue", "why_matters", "evidence", "recommended_fix", "task_description", "source", "confidence"]
+    },
+    "orchestrator.py": {
+      "invokes": [".claude/agents/pm.md", ".claude/agents/pl.md"],
+      "reads": ["tasks/ROADMAP.md", "tasks/OUTCOMES.md", "~/.claude/VALUES.md"],
+      "writes": ["tasks/ROADMAP.md", ".claude-orchestrator/orchestrator.log"],
+      "signals": ["YAML blocks between ---ORCHESTRATOR_SIGNAL--- markers"],
+      "gitOperations": ["branch creation (sprint/*)", "checkout", "merge --no-commit", "merge abort on conflict"]
+    },
+    ".claude/agents/pm.md": {
+      "uses": ["~/.claude/VALUES.md", "tasks/OUTCOMES.md", "tasks/ROADMAP.md"],
+      "outputs": ["tasks/ROADMAP.md", "tasks/prd-{sprint}.md", "YAML signals (next_task, parallel_tasks, completed, blocked, halt)"],
+      "invokedBy": ["orchestrator.py"]
+    },
+    ".claude/agents/pl.md": {
+      "uses": ["~/.claude/VALUES.md", "tasks/prd-{sprint}.md"],
+      "invokes": [".claude/commands/TaskGen.md", ".claude/commands/execute.md"],
+      "outputs": ["YAML signals (sprint_result with success/error)", "git commits on sprint/* branch"],
+      "invokedBy": ["orchestrator.py"]
+    },
+    ".claude/commands/values-discovery.md": {
+      "outputs": ["~/.claude/VALUES.md"],
+      "usedBy": [".claude/agents/cto.md", ".claude/agents/pm.md", ".claude/agents/pl.md"]
+    },
+    ".claude/commands/domain-values.md": {
+      "outputs": ["~/.claude/domains/{domain}.md"],
+      "usedBy": [".claude/agents/cto.md", ".claude/agents/pm.md", ".claude/agents/pl.md"]
     }
   },
   "keyInterfaces": {

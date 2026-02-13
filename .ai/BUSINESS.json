@@ -1,8 +1,8 @@
 {
   "meta": {
     "projectName": "fat-controller",
-    "version": "3.2.0",
-    "lastUpdated": "2026-02-10",
+    "version": "3.3.0",
+    "lastUpdated": "2026-02-14",
     "description": "Business logic, feature specifications, and product requirements"
   },
   "features": {
@@ -130,6 +130,33 @@
         "50% token reduction vs prior Codex versions",
         "25% faster execution",
         "Eliminated Sonnet tier (replaced with Codex 5.3)"
+      ]
+    },
+    "autonomousOrchestration": {
+      "status": "complete",
+      "version": "v3.3.0",
+      "description": "Python orchestrator for autonomous PM-PL execution cycles",
+      "keyComponents": [
+        "orchestrator.py - Python 3 stdlib orchestrator",
+        "PM agent (.claude/agents/pm.md) - Sprint planning",
+        "PL agent (.claude/agents/pl.md) - Sprint execution",
+        "ROADMAP.md template - Sprint state tracking",
+        "YAML signal protocol for orchestrator-agent communication",
+        "Git branch management (sprint/* branches)",
+        "Parallel PL execution for independent sprints",
+        "Two-phase merge with conflict detection"
+      ]
+    },
+    "valuesDrivenAgents": {
+      "status": "complete",
+      "version": "v3.3.0",
+      "description": "Agents load ~/.claude/VALUES.md for personalized decision-making with graceful degradation",
+      "keyComponents": [
+        "VALUES.md loading in cto.md, pm.md, pl.md",
+        "Graduated warning flow (check → recommend → confirm → confirm again → proceed)",
+        "Generic mode fallback (conservative judgments, ~60% confidence threshold)",
+        "/values-discovery and /domain-values commands",
+        "No gatekeeping: agents proceed in generic mode if VALUES.md missing"
       ]
     },
     "_example": {

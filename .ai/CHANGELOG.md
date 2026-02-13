@@ -9,29 +9,30 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
-- CTO agent file (.claude/agents/cto.md) with values-driven decision framework
-- CTO Decision-Making Framework sections in prd.md, bugs.md, feature.md, execute.md
-- Decision Authority sections defining what CTO decides vs escalates in each command
-- Autonomous code review triage by CTO-orchestrator (no user interruption for fixes)
-- CTO-advisor task completion review as post-execution validation step
-- 9-step post-execution flow: code review → CTO triage → fix agents → verification → CTO-advisor → memory update → archive
-- Dual-mode output for cto-technical-advisor (Mode A: briefing, Mode B: full advisory)
-- STATE.md audit trail for all CTO triage decisions
-- CTO Personality Overlay pattern in PATTERNS.md
-- CTO Code Review Triage pattern in PATTERNS.md
+- orchestrator.py: Python 3 stdlib orchestrator for autonomous PM-PL execution cycles (~1500 lines)
+- PM agent (.claude/agents/pm.md): Project Manager for sprint planning and PRD generation (273 lines)
+- PL agent (.claude/agents/pl.md): Project Lead for sprint execution via TaskGen and Execute (276 lines)
+- templates/ROADMAP.md: Sprint state tracking template (198 lines)
+- Structured Output Protocol: YAML signal blocks between ---ORCHESTRATOR_SIGNAL--- markers for orchestrator-agent communication
+- Values-Driven Agent Boot: PM, PL, and CTO agents load ~/.claude/VALUES.md for personalized decision-making
+- Graduated Warning Flow: orchestrator checks for VALUES.md, warns if missing, allows user to proceed in generic mode
+- Generic Mode: agents use conservative judgments (~60% confidence threshold) when VALUES.md absent
+- /values-discovery and /domain-values commands copied to fat-controller
+- Git branch management: orchestrator creates sprint/* branches per sprint
+- Parallel PL execution: orchestrator spawns multiple PL agents for independent sprints
+- Two-phase merge: orchestrator runs git merge --no-commit to detect conflicts before committing
+- Graceful shutdown: SIGINT (Ctrl+C) handler preserves ROADMAP.md state
+- Stuck detection: orchestrator halts if same sprint name appears 3 times in sequence
+- Session logging: .claude-orchestrator/orchestrator.log with structured timestamps
+- Autonomous Orchestration pattern in PATTERNS.md
+- Values-Driven Agent Boot pattern in PATTERNS.md
+- Structured Output Protocol pattern in PATTERNS.md
+- Python bytecode and orchestrator log exclusions in .gitignore
 
 ### Changed
-- Execute command now uses Codex 5.3 (gpt-5.3-codex) for all complexity levels
-- Model selection: Codex 5.3 medium for complexity 1-3, xhigh for complexity 4-5
-- Eliminated Sonnet tier (replaced with Codex 5.3 medium)
-- Codex 5.3 provides 50% token reduction and 25% faster execution vs prior versions
-- Commands (prd, bugs, feature, execute) now read cto.md at startup and adopt CTO decision framework
-- cto-technical-advisor agent updated with dual-mode output and Relationship to CTO section
-
-### Fixed
-- TD-004: pull-fc command missing explicit cto.md sync validation (deferred to TECH_DEBT.md)
-- TD-005: execute.md ambiguous 1-2 non-CRITICAL fix failure handling (deferred to TECH_DEBT.md)
-- TD-006: Escalation criteria duplication across commands (deferred to TECH_DEBT.md)
+- CTO agent (.claude/agents/cto.md) refactored for dynamic VALUES.md loading with graceful degradation
+- README.md, INSTALL-NEW.md, INSTALL-EXISTING.md updated with orchestrator documentation and usage examples
+- Memory system updated to track orchestrator components, agents, patterns, and data flows
 
 ---
 
