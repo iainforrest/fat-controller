@@ -18,6 +18,8 @@ Push improved commands or agents back to The Fat Controller repository as a pull
 | `.claude/agents/*.md` | `.claude/settings.local.json` |
 | `.claude/skills/*.md` | Project-specific commands |
 | `.claude/WORKFLOW.md` | |
+| `orchestrator.py` | |
+| `templates/ROADMAP.md` | |
 
 ## Steps
 

@@ -20,6 +20,8 @@ Pull the latest generic commands and agents from The Fat Controller repository.
 | `.claude/WORKFLOW.md` | |
 | `templates/.ai/*` (clean starter templates) | |
 | `templates/tasks/.gitkeep` | |
+| `orchestrator.py` (autonomous orchestrator) | |
+| `templates/ROADMAP.md` (sprint state template) | |
 
 ## Steps
 
@@ -47,13 +49,15 @@ echo "Cloned to $TEMP_DIR"
 
 ### 2. Compare files
 
-Compare these directories:
+Compare these directories and files:
 - `.claude/commands/` (all files including pull-fc.md and push-fc.md)
 - `.claude/agents/`
 - `.claude/skills/`
 - `.claude/WORKFLOW.md` (if exists)
 - `templates/.ai/` (all template files and subdirectories)
 - `templates/tasks/.gitkeep`
+- `orchestrator.py` (project root)
+- `templates/ROADMAP.md`
 
 For each file, determine:
 - **New**: Exists in starter but not locally
@@ -90,6 +94,8 @@ Ask the user:
 Copy approved files from temp directory:
 - `.claude/` files to this project's `.claude/` directory
 - `templates/` files to this project's `templates/` directory (create if needed)
+- `orchestrator.py` to this project's root directory
+- `templates/ROADMAP.md` to this project's `templates/` directory
 
 ### 6. Cleanup
 
