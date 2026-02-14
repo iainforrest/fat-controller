@@ -47,7 +47,7 @@
     "templateSeparation": {
       "status": "complete",
       "version": "v3.1.0",
-      "description": "Clean starter templates separated from active project memory",
+      "description": "Template system for project bootstrap - see ARCHITECTURE.json for technical pattern",
       "keyComponents": [
         "templates/.ai/ - pristine starter files with examples",
         ".ai/ - active project memory",

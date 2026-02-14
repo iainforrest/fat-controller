@@ -67,7 +67,7 @@ This system is designed to:
 
 **Core Principle**: Each piece of knowledge has ONE authoritative home. No duplication across files.
 
-**See QUICK.md** for the complete Authority Map table showing which file owns each content type.
+Refer to QUICK.md for the authority map and content routing.
 
 **Navigation**: Use QUICK.md as your router to find where specific content lives.
 
