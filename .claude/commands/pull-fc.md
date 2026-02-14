@@ -16,9 +16,10 @@ Pull the latest generic commands and agents from The Fat Controller repository.
 |-------|-------------|
 | `.claude/commands/*.md` | `.ai/*` (project-specific memory) |
 | `.claude/agents/*.md` | `.claude/settings.local.json` (machine-specific) |
-| `.claude/skills/*.md` | `templates/*` (distribution-only, for new installs) |
-| `.claude/WORKFLOW.md` | |
+| `.claude/skills/*.md` | `templates/.ai/*` (distribution-only, for new installs) |
+| `.claude/WORKFLOW.md` | `templates/tasks/.gitkeep` (distribution-only) |
 | `orchestrator.py` (autonomous orchestrator) | |
+| `templates/ROADMAP.md` (PM agent template) | |
 
 ## Steps
 
@@ -77,8 +78,9 @@ Compare these directories and files:
 - `.claude/skills/`
 - `.claude/WORKFLOW.md` (if exists)
 - `orchestrator.py` (project root)
+- `templates/ROADMAP.md` (used by PM agent on first run)
 
-**DO NOT sync `templates/` files** — those are distribution-only (used by `npx create-fat-controller` for new project setup). Consuming projects have their own `.ai/` memory and don't need starter templates.
+**DO NOT sync `templates/.ai/*` or `templates/tasks/.gitkeep`** — those are distribution-only (used by `npx create-fat-controller` for new project setup). Consuming projects have their own `.ai/` memory and don't need starter templates.
 
 For each file, determine:
 - **New**: Exists in starter but not locally
@@ -115,8 +117,9 @@ Ask the user:
 Copy approved files from temp directory:
 - `.claude/` files to this project's `.claude/` directory
 - `orchestrator.py` to this project's root directory
+- `templates/ROADMAP.md` to this project's `templates/` directory (create if needed)
 
-**DO NOT copy `templates/` files** — those are for new project installs only.
+**DO NOT copy `templates/.ai/*` or `templates/tasks/.gitkeep`** — those are for new project installs only.
 
 ### 6. Cleanup
 
