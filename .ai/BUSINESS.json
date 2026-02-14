@@ -1,7 +1,7 @@
 {
   "meta": {
     "projectName": "fat-controller",
-    "version": "3.3.0",
+    "version": "3.3.1",
     "lastUpdated": "2026-02-14",
     "description": "Business logic, feature specifications, and product requirements"
   },
@@ -157,6 +157,33 @@
         "Generic mode fallback (conservative judgments, ~60% confidence threshold)",
         "/values-discovery and /domain-values commands",
         "No gatekeeping: agents proceed in generic mode if VALUES.md missing"
+      ]
+    },
+    "orchestrateCommand": {
+      "status": "complete",
+      "version": "v3.3.1",
+      "description": "Launch orchestrator in tmux background session with pre-flight checks and UX flow",
+      "keyComponents": [
+        "/orchestrate command with 4-step pre-flight (git, OUTCOMES.md, VALUES.md, tmux session)",
+        "Tmux background session survives Claude Code context exhaustion",
+        "Graduated VALUES.md warning (recommend /values-discovery, allow proceed)",
+        "Session management (attach/kill/cancel for existing sessions)",
+        "Log to tasks/orchestrator.log",
+        "Remain in Claude Code session after launch (do NOT end conversation)"
+      ]
+    },
+    "outcomesCommand": {
+      "status": "complete",
+      "version": "v3.3.1",
+      "description": "Interactive outcome discovery and project state file initialization",
+      "keyComponents": [
+        "/outcomes command with idempotency gate (review/fresh/cancel)",
+        "Multi-round discovery (open context → extract outcomes → refine)",
+        "Stopping criteria (measurable, no contradictions, constraints explicit)",
+        "Confirmation before file creation",
+        "Create OUTCOMES.md, PROJECT_STATE.md, DECISIONS.md",
+        "Optional Project Lead section in CLAUDE.md",
+        "Offer to run /orchestrate after completion"
       ]
     },
     "_example": {

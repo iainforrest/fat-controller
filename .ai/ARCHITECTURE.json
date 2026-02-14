@@ -1,7 +1,7 @@
 {
   "meta": {
     "projectName": "fat-controller",
-    "version": "3.3.0",
+    "version": "3.3.1",
     "lastUpdated": "2026-02-14",
     "description": "Architecture patterns, data flows, and component relationships"
   },
@@ -308,6 +308,50 @@
         ".claude/commands/domain-values.md"
       ],
       "dataModel": "VALUES.md (optional, user-specific values profile)"
+    },
+    "orchestrateCommandFlow": {
+      "name": "Orchestrate command pre-flight and tmux launch workflow",
+      "steps": [
+        "User invokes /orchestrate command",
+        "Check 1: git repository exists",
+        "Check 2: tasks/OUTCOMES.md exists (redirect to /outcomes if missing)",
+        "Check 3: ~/.claude/VALUES.md exists (graduated warning, allow proceed)",
+        "Check 4: tmux session 'orchestrator' exists (attach/kill/cancel)",
+        "Launch: tmux new-session -d -s orchestrator with orchestrator.py",
+        "Verify: tmux session started successfully",
+        "Return: provide attach/monitor/shutdown instructions",
+        "Session runs independently in background"
+      ],
+      "keyFiles": [
+        ".claude/commands/orchestrate.md",
+        "orchestrator.py",
+        "tasks/OUTCOMES.md"
+      ],
+      "dataModel": "Tmux session running orchestrator.py → tasks/orchestrator.log"
+    },
+    "outcomesCommandFlow": {
+      "name": "Outcomes command interactive discovery and state file initialization",
+      "steps": [
+        "User invokes /outcomes command",
+        "Idempotency gate: check if OUTCOMES.md exists (review/fresh/cancel)",
+        "Discovery Round 1: open context gathering (1 question)",
+        "Discovery Round 2: extract and propose outcomes (1-3 questions)",
+        "Discovery Round 3+: refinement until stopping criteria met",
+        "Confirmation: summarize outcomes and wait for approval",
+        "Create tasks/OUTCOMES.md (or overwrite if fresh start)",
+        "Create tasks/PROJECT_STATE.md (if missing)",
+        "Create tasks/DECISIONS.md (if missing)",
+        "Optional: add Project Lead section to CLAUDE.md",
+        "Offer to run /orchestrate command"
+      ],
+      "keyFiles": [
+        ".claude/commands/outcomes.md",
+        "tasks/OUTCOMES.md",
+        "tasks/PROJECT_STATE.md",
+        "tasks/DECISIONS.md",
+        "CLAUDE.md"
+      ],
+      "dataModel": "Interactive Q&A → OUTCOMES.md + state files → optional orchestrate launch"
     },
     "_example": {
       "name": "User authentication flow",

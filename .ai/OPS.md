@@ -40,10 +40,16 @@
 [CLEAN_BUILD]                # e.g., "npm run clean && npm run build"
 
 # Autonomous Orchestrator
-python3 orchestrator.py /path/to/project [--max-cycles 50] [--log-level INFO]
+python3 orchestrator.py /path/to/project [--max-cycles 50] [--log-level INFO] [--skip-values-check]
 # Drives autonomous PM-PL cycles
 # Logs to .claude-orchestrator/orchestrator.log
 # Ctrl+C for graceful shutdown
+# --skip-values-check: skip VALUES.md prompts (used by /orchestrate command)
+
+# Launch via /orchestrate command (recommended)
+# Run /orchestrate to launch in tmux background session
+# Logs to tasks/orchestrator.log
+# Session survives Claude Code context exhaustion
 ```
 
 ---
@@ -266,8 +272,12 @@ python3 orchestrator.py . --max-cycles 50 --log-level INFO
 
 ### Resuming After Stop
 
-The orchestrator is stateless. Resume by re-running:
+The orchestrator is stateless. Resume by re-running the orchestrate command:
 ```bash
+# Via /orchestrate command (recommended)
+/orchestrate
+
+# Or directly via Python
 python3 orchestrator.py /path/to/project
 ```
 
@@ -276,6 +286,22 @@ Orchestrator reads ROADMAP.md to determine where to resume:
 - Sprints with status `in_progress`: were interrupted, PM will assess
 - Sprints with status `done`: completed, skip
 - Sprints with status `blocked`: require user intervention
+
+### Viewing Orchestrator Progress
+
+```bash
+# Attach to tmux session
+tmux attach -t orchestrator
+
+# Follow log without attaching
+tail -f tasks/orchestrator.log
+
+# Graceful shutdown (saves state)
+tmux send-keys -t orchestrator C-c
+
+# Force kill
+tmux kill-session -t orchestrator
+```
 
 ### Common Issues
 

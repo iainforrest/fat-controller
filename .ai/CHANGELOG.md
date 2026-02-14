@@ -9,7 +9,10 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- /orchestrate command: Launch orchestrator in tmux background session with pre-flight checks
+- /outcomes command: Interactive project setup for outcome discovery and state file initialization
 - orchestrator.py: Python 3 stdlib orchestrator for autonomous PM-PL execution cycles (~1500 lines)
+- --skip-values-check flag for orchestrator.py (used by /orchestrate command)
 - PM agent (.claude/agents/pm.md): Project Manager for sprint planning and PRD generation (273 lines)
 - PL agent (.claude/agents/pl.md): Project Lead for sprint execution via TaskGen and Execute (276 lines)
 - templates/ROADMAP.md: Sprint state tracking template (198 lines)
@@ -28,11 +31,20 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Values-Driven Agent Boot pattern in PATTERNS.md
 - Structured Output Protocol pattern in PATTERNS.md
 - Python bytecode and orchestrator log exclusions in .gitignore
+- package.json: includes orchestrator.py and templates/ROADMAP.md in npm distribution files array
 
 ### Changed
+- /outcomes command offers to run /orchestrate after completion (optional)
 - CTO agent (.claude/agents/cto.md) refactored for dynamic VALUES.md loading with graceful degradation
 - README.md, INSTALL-NEW.md, INSTALL-EXISTING.md updated with orchestrator documentation and usage examples
 - Memory system updated to track orchestrator components, agents, patterns, and data flows
+- PM agent graduated warning flow clarified for VALUES.md handling
+
+### Fixed
+- Code review findings: Python bytecode patterns in .gitignore
+- Code review findings: YAML parser logging improvements
+- Code review findings: Sequential execution guard in orchestrator.py
+- Code review findings: SIGINT handler placement for graceful shutdown
 
 ---
 

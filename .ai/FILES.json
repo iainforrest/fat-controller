@@ -2,7 +2,7 @@
   "meta": {
     "projectName": "fat-controller",
     "lastUpdated": "2026-02-14",
-    "totalFiles": 44,
+    "totalFiles": 46,
     "description": "Smart file index with cross-references and quick navigation",
     "lineNumberPolicy": "Use globs or directories instead of file:line references."
   },
@@ -23,7 +23,9 @@
         ".claude/commands/debate.md",
         ".claude/commands/drift-report.md",
         ".claude/commands/values-discovery.md",
-        ".claude/commands/domain-values.md"
+        ".claude/commands/domain-values.md",
+        ".claude/commands/outcomes.md",
+        ".claude/commands/orchestrate.md"
       ]
     },
     "agents": {
@@ -101,7 +103,8 @@
       "orchestrator": ["orchestrator.py"],
       "agents": [".claude/agents/pm.md", ".claude/agents/pl.md"],
       "stateFiles": ["tasks/ROADMAP.md", "tasks/OUTCOMES.md"],
-      "templates": ["templates/ROADMAP.md"]
+      "templates": ["templates/ROADMAP.md"],
+      "commands": [".claude/commands/outcomes.md", ".claude/commands/orchestrate.md"]
     }
   },
   "byLayer": {
@@ -212,6 +215,19 @@
     ".claude/commands/domain-values.md": {
       "outputs": ["~/.claude/domains/{domain}.md"],
       "usedBy": [".claude/agents/cto.md", ".claude/agents/pm.md", ".claude/agents/pl.md"]
+    },
+    ".claude/commands/outcomes.md": {
+      "outputs": ["tasks/OUTCOMES.md", "tasks/PROJECT_STATE.md", "tasks/DECISIONS.md"],
+      "optionalOutputs": ["CLAUDE.md (Project Lead section)"],
+      "references": ["~/.claude/agents/project-lead.md"],
+      "invokes": [".claude/commands/orchestrate.md (optional)"]
+    },
+    ".claude/commands/orchestrate.md": {
+      "uses": ["tasks/OUTCOMES.md", "~/.claude/VALUES.md (optional)"],
+      "invokes": ["orchestrator.py"],
+      "prerequisites": ["git repository", "tasks/OUTCOMES.md"],
+      "tmuxSession": "orchestrator",
+      "outputs": ["tasks/orchestrator.log"]
     }
   },
   "keyInterfaces": {

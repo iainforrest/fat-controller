@@ -54,6 +54,7 @@ Find the right pattern for your task:
 | Autonomous PM-PL cycles | Autonomous Orchestration Pattern | (below) |
 | Values-driven agent boot | Values-Driven Agent Boot Pattern | (below) |
 | Structured agent signals | Structured Output Protocol | (below) |
+| Tmux background execution | Tmux Background Orchestration | (below) |
 
 *Table expands as you add patterns. Update when adding new domain files.*
 
@@ -656,6 +657,79 @@ orchestrator.py startup:
 ```
 
 **Reference**: `orchestrator.py`, `.claude/agents/pm.md`, `.claude/agents/pl.md`, `templates/ROADMAP.md`
+
+---
+
+## Built-in Pattern: Tmux Background Orchestration
+
+Launch long-running autonomous processes in tmux sessions that survive context exhaustion.
+
+### When to Use
+- Long-running autonomous orchestration (PM-PL cycles)
+- Want process to survive Claude Code session ending
+- Need to attach/detach from running process
+- Want to view progress without interrupting execution
+
+### Pattern Structure
+```
+Command checks prerequisites
+    ↓
+Launch in tmux background session
+    ↓
+Verify session started
+    ↓
+Return to user immediately
+    ↓
+Session runs independently
+    ↓
+User can attach/detach anytime
+```
+
+### Implementation Checklist
+- [ ] Check if tmux is installed
+- [ ] Check if session already exists (offer attach/kill/cancel)
+- [ ] Build command with proper logging
+- [ ] Launch in detached tmux session with descriptive name
+- [ ] Verify session started successfully
+- [ ] Provide attach/monitor/shutdown instructions
+- [ ] Keep Claude Code session open (do NOT end conversation)
+
+### Tmux Session Command Pattern
+```bash
+tmux new-session -d -s {session-name} "{command} 2>&1 | tee {log-file}; echo '--- Process exited. Press Enter to close. ---'; read"
+```
+
+### User Instructions Template
+```
+{Process} started successfully.
+
+It's running in the background as a tmux session -- it will keep running even if you close this Claude Code session.
+
+To view it from any terminal:
+  tmux attach -t {session-name}
+
+Other useful commands:
+  tail -f {log-file}                          # Follow the log without attaching
+  tmux send-keys -t {session-name} C-c        # Graceful shutdown (saves state)
+  tmux kill-session -t {session-name}         # Force kill
+
+To resume after stopping:
+  {resume-instructions}
+```
+
+### Error Handling
+- **tmux not installed**: suggest installation or fall back to Bash run_in_background
+- **session exists**: offer attach/kill/cancel options
+- **session fails to start**: read log file and report error
+- **process not found**: provide installation instructions
+
+### Important Notes
+- After launching, remain in Claude Code session (do NOT end conversation)
+- User may want to continue working while background process runs
+- Background process survives context window exhaustion
+- Tmux session persists across terminal sessions
+
+**Reference**: `.claude/commands/orchestrate.md`
 
 ---
 
