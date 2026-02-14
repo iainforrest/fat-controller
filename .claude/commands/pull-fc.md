@@ -47,6 +47,31 @@ git clone --depth 1 https://github.com/iainforrest/fat-controller.git "$TEMP_DIR
 echo "Cloned to $TEMP_DIR"
 ```
 
+### 1.5. Self-Update Check (CRITICAL)
+
+Before comparing all files, check if `pull-fc.md` itself has changed:
+
+```bash
+diff -q "$TEMP_DIR/.claude/commands/pull-fc.md" ".claude/commands/pull-fc.md"
+```
+
+**If pull-fc.md differs:**
+
+1. Show the user: "pull-fc.md itself has been updated. Applying self-update first so the latest sync rules are used."
+2. Copy ONLY the new pull-fc.md into place:
+   ```bash
+   cp "$TEMP_DIR/.claude/commands/pull-fc.md" ".claude/commands/pull-fc.md"
+   ```
+3. Clean up the temp directory:
+   ```bash
+   rm -rf "$TEMP_DIR"
+   ```
+4. Tell the user: "pull-fc has been updated. Re-running with new sync rules..."
+5. Re-invoke `/pull-fc` using the Skill tool: `Skill(skill="pull-fc")`
+6. **STOP here** — do NOT continue to Step 2. The re-invoked command will handle everything with the updated sync list.
+
+**If pull-fc.md is unchanged:** Continue to Step 2.
+
 ### 2. Compare files
 
 Compare these directories and files:
