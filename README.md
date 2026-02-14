@@ -251,9 +251,8 @@ Status tracking (`pending` -> `in_progress` -> `completed`) enables stopping and
 |-------|-------------|
 | `.claude/commands/*.md` | `.ai/*` (project-specific) |
 | `.claude/agents/*.md` | `.claude/settings.local.json` |
-| `.claude/skills/*.md` | Project-specific commands |
+| `.claude/skills/*.md` | `templates/*` (distribution-only) |
 | `orchestrator.py` | |
-| `templates/ROADMAP.md` | |
 
 ## Credits
 
