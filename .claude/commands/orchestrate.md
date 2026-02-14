@@ -79,13 +79,23 @@ Run /values-discovery when ready, then come back to /orchestrate.
 ```
 Stop here.
 
-### 4. Check for Existing Orchestrator Session
+### 4. Determine Session Name
 
-Run via Bash: `tmux has-session -t orchestrator 2>/dev/null`
+The tmux session name is project-specific so multiple orchestrators can run in parallel for different projects. Derive it from the project directory:
+
+```bash
+SESSION_NAME="orch-$(basename "$PWD")"
+```
+
+Store this for use in all subsequent tmux commands.
+
+### 5. Check for Existing Orchestrator Session
+
+Run via Bash: `tmux has-session -t {SESSION_NAME} 2>/dev/null`
 
 If a session exists, use AskUserQuestion:
 ```
-question: "An orchestrator tmux session is already running. What would you like to do?"
+question: "An orchestrator session '{SESSION_NAME}' is already running for this project. What would you like to do?"
 header: "Session"
 options:
   - label: "Attach to it"
@@ -96,8 +106,8 @@ options:
     description: "Leave the existing session running and exit."
 ```
 
-- Attach: tell user to run `tmux attach -t orchestrator` in their terminal
-- Kill and restart: run `tmux kill-session -t orchestrator` then continue to launch
+- Attach: tell user to run `tmux attach -t {SESSION_NAME}` in their terminal
+- Kill and restart: run `tmux kill-session -t {SESSION_NAME}` then continue to launch
 - Cancel: stop here
 
 ---
@@ -124,37 +134,39 @@ fi
 ### Launch in tmux
 
 ```bash
-tmux new-session -d -s orchestrator "python3 {ORCH} {project_dir} --skip-values-check 2>&1 | tee tasks/orchestrator.log; echo '--- Orchestrator exited. Press Enter to close. ---'; read"
+tmux new-session -d -s {SESSION_NAME} "python3 {ORCH} {project_dir} --skip-values-check 2>&1 | tee tasks/orchestrator.log; echo ''; echo '--- Orchestrator exited. Session will close in 30 seconds. ---'; sleep 30"
 ```
 
 The `--skip-values-check` flag is used because we already handled the VALUES.md check above with better UX.
+
+The session auto-closes 30 seconds after the orchestrator exits. All output is preserved in `tasks/orchestrator.log`. If someone is attached and watching, they have 30 seconds to read the final output before the session closes.
 
 ### Verify launch
 
 After running the tmux command, verify it started:
 
 ```bash
-tmux has-session -t orchestrator 2>/dev/null && echo "running" || echo "failed"
+tmux has-session -t {SESSION_NAME} 2>/dev/null && echo "running" || echo "failed"
 ```
 
 If it failed, check `tasks/orchestrator.log` for errors and report them.
 
 ### Confirmation
 
-After verifying the session is running, respond with:
+After verifying the session is running, respond with (substituting the actual session name):
 
 ```
-Orchestrator started successfully.
+Orchestrator started successfully as '{SESSION_NAME}'.
 
-It's running in the background as a tmux session -- it will keep running even if you close this Claude Code session.
+It's running in the background as a tmux session -- it will keep running even if you close this Claude Code session. The session auto-closes 30 seconds after the orchestrator finishes.
 
 To view it from any terminal:
-  tmux attach -t orchestrator
+  tmux attach -t {SESSION_NAME}
 
 Other useful commands:
   tail -f tasks/orchestrator.log                    # Follow the log without attaching
-  tmux send-keys -t orchestrator C-c                # Graceful shutdown (saves state)
-  tmux kill-session -t orchestrator                  # Force kill
+  tmux send-keys -t {SESSION_NAME} C-c              # Graceful shutdown (saves state)
+  tmux kill-session -t {SESSION_NAME}                # Force kill
 
 To resume after stopping:
   Run /orchestrate again -- it reads ROADMAP.md and picks up where it left off.
