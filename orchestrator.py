@@ -647,6 +647,16 @@ def read_roadmap(state: OrchestratorState) -> Optional[str]:
 # 7.5 -- Agent invocation via subprocess
 # ---------------------------------------------------------------------------
 
+def _agent_env() -> Dict[str, str]:
+    """Return a clean environment for spawning Claude agent subprocesses.
+
+    Strips CLAUDECODE so that `claude --print` doesn't refuse to launch
+    when the orchestrator is itself running inside a Claude Code session.
+    """
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+    return env
+
 def invoke_agent(
     agent_name: str,
     context: str,
@@ -687,6 +697,7 @@ def invoke_agent(
             text=True,
             timeout=timeout,
             cwd=str(project_dir),
+            env=_agent_env(),
         )
     except subprocess.TimeoutExpired:
         elapsed = time.monotonic() - start_time
@@ -758,6 +769,7 @@ def invoke_agent_async(
         stderr=subprocess.PIPE,
         text=True,
         cwd=str(project_dir),
+        env=_agent_env(),
     )
 
 
@@ -785,8 +797,42 @@ def get_current_branch(project_dir: Path) -> str:
     return result.stdout.strip()
 
 
+def _stash_if_dirty(project_dir: Path) -> bool:
+    """Stash uncommitted changes if the working tree is dirty.
+
+    Returns True if changes were stashed (caller should pop later).
+    """
+    status = git_run(["status", "--porcelain"], project_dir, check=False)
+    if status.stdout.strip():
+        result = git_run(
+            ["stash", "push", "-m", "orchestrator-auto-stash"],
+            project_dir, check=False,
+        )
+        if result.returncode == 0:
+            logger.info("Stashed dirty working tree before branch switch")
+            return True
+        logger.warning("Failed to stash: %s", result.stderr)
+    return False
+
+
+def _stash_pop(project_dir: Path) -> None:
+    """Pop the most recent stash if it's an orchestrator auto-stash."""
+    # Verify top stash is ours before popping
+    result = git_run(
+        ["stash", "list", "--max-count=1"], project_dir, check=False,
+    )
+    if "orchestrator-auto-stash" in result.stdout:
+        pop = git_run(["stash", "pop"], project_dir, check=False)
+        if pop.returncode == 0:
+            logger.info("Restored stashed changes")
+        else:
+            logger.warning("Stash pop failed: %s", pop.stderr)
+
+
 def create_branch(branch_name: str, project_dir: Path) -> bool:
     """Create and checkout a git branch. Returns True on success."""
+    stashed = _stash_if_dirty(project_dir)
+
     # Check if branch already exists
     result = git_run(
         ["rev-parse", "--verify", branch_name], project_dir, check=False
@@ -797,7 +843,11 @@ def create_branch(branch_name: str, project_dir: Path) -> bool:
         checkout = git_run(["checkout", branch_name], project_dir, check=False)
         if checkout.returncode != 0:
             logger.error("Failed to checkout '%s': %s", branch_name, checkout.stderr)
+            if stashed:
+                _stash_pop(project_dir)
             return False
+        if stashed:
+            _stash_pop(project_dir)
         return True
 
     # Create new branch from current HEAD
@@ -805,20 +855,29 @@ def create_branch(branch_name: str, project_dir: Path) -> bool:
     result = git_run(["checkout", "-b", branch_name], project_dir, check=False)
     if result.returncode != 0:
         logger.error("Failed to create branch '%s': %s", branch_name, result.stderr)
+        if stashed:
+            _stash_pop(project_dir)
         return False
+    if stashed:
+        _stash_pop(project_dir)
     return True
 
 
 def checkout_main(project_dir: Path) -> bool:
     """Checkout the main branch (tries 'main' then 'master')."""
+    stashed = _stash_if_dirty(project_dir)
     for branch in ("main", "master"):
         result = git_run(
             ["rev-parse", "--verify", branch], project_dir, check=False
         )
         if result.returncode == 0:
             checkout = git_run(["checkout", branch], project_dir, check=False)
+            if stashed:
+                _stash_pop(project_dir)
             return checkout.returncode == 0
     logger.error("Neither 'main' nor 'master' branch found")
+    if stashed:
+        _stash_pop(project_dir)
     return False
 
 
