@@ -131,7 +131,7 @@ Agents provide domain expertise and are invoked automatically by commands:
 | `pm` | Sprint planning, PRD generation, roadmap management |
 | `pl` | Sprint execution via TaskGen and Execute |
 | `cto` | Architecture decisions, technical judgment (values-driven) |
-| `execution-agent` | Fresh-context task execution with domain skill loading |
+| `task-protocol` | Execution protocol for Codex/Claude — subtask handling, commits, verification |
 | `code-review-agent` | Dual-model code quality review |
 | `research-agent` | Deep research with plan/execute/synthesize phases |
 | `cto-technical-advisor` | Architecture decisions, feasibility assessment |
