@@ -28,6 +28,8 @@ You receive these arguments from the orchestrator:
 
 Run at every session start. Steps are sequential -- each depends on the previous.
 
+**Log event:** At session start, create the log file and log `PHASE=pl-start SPRINT={SPRINT_NAME} BRANCH={BRANCH}`.
+
 ### Step 1: Load Values
 
 Read `~/.claude/VALUES.md` if it exists.
@@ -46,6 +48,8 @@ If VALUES.md was not found:
 - When trade-offs are ambiguous, prefer correctness over speed
 - Prefer doing less well over doing more poorly
 
+**Log event:** `PHASE=boot-values STATUS={loaded/generic}` -- log whether VALUES.md was found.
+
 ### Step 2: Read Sprint PRD
 
 Read the PRD at the path provided in the `SPRINT_PRD` input argument.
@@ -53,6 +57,8 @@ Read the PRD at the path provided in the `SPRINT_PRD` input argument.
 - **If file missing**: Signal `error` with `PRD not found at {path}`
 - **If file empty or unparseable**: Signal `error` with parse details
 - **If found**: Extract sprint scope, success criteria, and constraints. Proceed.
+
+**Log event:** `PHASE=boot-prd PRD={SPRINT_PRD}`
 
 ### Step 3: Verify Git Branch
 
@@ -63,6 +69,8 @@ Run `git branch --show-current` and verify it matches the `BRANCH` input argumen
 - **If on correct branch**: Proceed.
 
 **Hard rule: NEVER commit directly to main or master.** All work happens on the sprint branch. If you detect you are on main/master, signal `error` immediately -- do not attempt any work.
+
+**Log event:** `PHASE=boot-branch BRANCH={BRANCH}`
 
 ### Step 4: Load Project Context
 
@@ -75,6 +83,50 @@ Read the project's memory system for architectural awareness:
 
 If memory files are missing, continue without them -- they are helpful but not required.
 
+**Log event:** `PHASE=boot-complete`
+
+---
+
+## Session Logging
+
+Log phase transitions to a flat file for post-hoc diagnosis of PL session progress.
+
+### Log File
+
+`tasks/{SPRINT_NAME}/pl-session.log`
+
+Create this file at session start, before the boot sequence begins.
+
+### Log Format
+
+```
+[ISO8601] PHASE=name KEY=value KEY=value ...
+```
+
+### How to Log
+
+Use Bash `echo` append at each phase transition:
+
+```bash
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] PHASE=phase-name KEY=value" >> tasks/{SPRINT_NAME}/pl-session.log
+```
+
+### Required Phase Events
+
+| Phase | When to Log | Key Fields |
+|-------|------------|------------|
+| `pl-start` | First thing at session start | `SPRINT={SPRINT_NAME} BRANCH={BRANCH}` |
+| `boot-values` | After Step 1 (values load) | `STATUS={loaded/generic}` |
+| `boot-prd` | After Step 2 (PRD read) | `PRD={SPRINT_PRD}` |
+| `boot-branch` | After Step 3 (branch verify) | `BRANCH={BRANCH}` |
+| `boot-complete` | After Step 4 (context load) | (no extra fields) |
+| `taskgen-start` | Before Step 5 (TaskGen) | (no extra fields) |
+| `taskgen-complete` | After Step 5 (TaskGen done) | `PARENT_TASKS={n}` |
+| `execute-start` | Before Step 6 (Execute) | `FEATURE={feature-name}` |
+| `execute-complete` | After Step 6 (Execute done) | `STATUS={done/failed}` |
+| `results` | After Step 7 (results collected) | `TASKS_DONE={n} TASKS_TOTAL={n} COMMITS={n}` |
+| `signal` | Before emitting output signal | `TYPE={done/blocked/error}` |
+
 ---
 
 ## Execution Pipeline
@@ -83,6 +135,8 @@ After boot completes successfully, execute the sprint in strict order.
 
 ### Step 5: Run TaskGen
 
+**Log event:** `PHASE=taskgen-start`
+
 Invoke `/TaskGen` with the sprint PRD to generate implementation tasks.
 
 - **Input**: The sprint PRD path (from `SPRINT_PRD`)
@@ -90,11 +144,16 @@ Invoke `/TaskGen` with the sprint PRD to generate implementation tasks.
 - **If TaskGen fails**: Retry once. If still failing, signal `error` with failure details.
 - **If task.xml already exists** for this sprint: Skip TaskGen and use the existing task file. Log that you are reusing existing tasks.
 
+**Log event:** `PHASE=taskgen-complete PARENT_TASKS={n}` -- log the number of parent tasks generated.
+
 ### Step 6: Run Execute
+
+**Log event:** `PHASE=execute-start FEATURE={feature-name}`
 
 Invoke `/execute` with the feature name to work through the generated tasks.
 
 - **Input**: The feature/sprint name derived from `SPRINT_NAME`
+- **Model selection**: Execute must use Codex 5.3 (gpt-5.3-codex) via Bash for ALL tasks -- medium reasoning for complexity 1-3, xhigh reasoning for complexity 4-5. Do not use the Task tool to spawn agents for implementation. Codex via Bash is faster and cheaper.
 - **Monitor**: Track execution progress as Execute works through parent tasks
 - **Capture**: Collect commit SHAs from `git log` after execution completes
 - **If execution fails**: Capture error details. Do not retry Execute -- include the failure in the PL signal so the orchestrator can decide.
@@ -107,6 +166,8 @@ Not all sprints produce code. For document-type, configuration, or process tasks
 - The PL does not need special handling -- the task.xml verify commands should already be appropriate
 - If verify commands seem wrong for the task type, note this in the signal summary but do not block
 
+**Log event:** `PHASE=execute-complete STATUS={done/failed}`
+
 ### Step 7: Collect Results
 
 After Execute completes:
@@ -115,6 +176,8 @@ After Execute completes:
 2. **Count tasks**: Parse the task.xml to count completed vs total parent tasks
 3. **Gather commits**: Run `git log {BRANCH} --not main --oneline` to collect all commit SHAs on this branch
 4. **Check for uncommitted work**: Run `git status --porcelain`. If there are uncommitted changes, note in summary.
+
+**Log event:** `PHASE=results TASKS_DONE={completed} TASKS_TOTAL={total} COMMITS={commit_count}`
 
 ---
 
@@ -138,6 +201,8 @@ After Execute completes:
 ---
 
 ## Output Signal Protocol
+
+**Log event:** `PHASE=signal TYPE={done/blocked/error}` -- log before emitting the signal block.
 
 As the **LAST** thing you do in every session, output a structured signal block. This is how the orchestrator knows what happened. The signal block MUST be the final output -- nothing after it.
 

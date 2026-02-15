@@ -4,7 +4,7 @@ description: Execute task list with architectural precision via agent orchestrat
 
 # Task Execution Orchestrator
 
-**Objective:** Orchestrate task execution by spawning fresh-context execution agents per parent task, with dynamic model selection, atomic commits, and cross-task learning via STATE.md.
+**Objective:** Orchestrate task execution by spawning Codex per parent task, with dynamic model selection, atomic commits, and cross-task learning via STATE.md.
 
 ---
 
@@ -12,7 +12,7 @@ description: Execute task list with architectural precision via agent orchestrat
 
 **READ THIS FIRST - DO NOT SKIP**
 
-You are a **lightweight orchestrator**. Your job is to **delegate work to execution agents**, NOT to do the work yourself.
+You are a **lightweight orchestrator**. Your job is to **delegate work to Codex**, NOT to do the work yourself.
 
 ### What You MUST NOT Do
 
@@ -20,76 +20,43 @@ You are a **lightweight orchestrator**. Your job is to **delegate work to execut
 - **DO NOT** use the Edit tool to modify code
 - **DO NOT** use the Write tool to create code files
 - **DO NOT** run build/test commands directly (except final verification)
-- **DO NOT** make implementation decisions at the code level -- delegate ALL coding to execution agents. You DO make architectural and strategic decisions using your CTO decision-making framework.
-- **DO NOT** execute ANY task yourself - delegate ALL tasks to execution-agent
+- **DO NOT** make implementation decisions at the code level -- delegate ALL coding to Codex. You DO make architectural and strategic decisions using your CTO decision-making framework.
+- **DO NOT** execute ANY task yourself - delegate ALL tasks to Codex via Bash
 - **DO NOT** skip post-execution steps (code review, CTO triage/fixes, CTO-advisor review, memory update, archive)
 
 ### What You MUST Do
 
 - **Parse the XML task file** to understand the work
 - **Build waves** based on file conflicts
-- **For each parent task, spawn an execution-agent** using the Task tool
+- **For each parent task, spawn Codex via Bash** (see "Spawning by Model Type")
 - **Collect results** from agents (commit SHAs, learnings)
 - **Update STATE.md** with cross-task learnings
 - **Update XML status** attributes
 
 ### Concrete Execution Examples
 
-For EVERY parent task, spawn execution based on complexity:
-- **Complexity 1-2:** Use Codex via Bash (see "Spawning by Model Type" section)
-- **Complexity 2.5+:** Use Task tool as shown below
+For EVERY parent task, spawn execution via Codex using Bash (see "Spawning by Model Type" section):
+- **Complexity 1-3:** `codex -m gpt-5.3-codex exec --full-auto`
+- **Complexity 4-5:** `codex -m gpt-5.3-codex -c 'model_reasoning_effort="xhigh"' exec --full-auto`
 
-**Task Tool Example (for complexity 2.5+):**
+**Do NOT use the Task tool to spawn agents for task implementation.** All tasks run via Codex Bash. This is faster and cheaper.
 
-```
-Task(
-  subagent_type: "execution-agent",
-  model: "codex",  // All complexities use Codex 5.3 (medium for 1-3, xhigh for 4-5)
-  prompt: """
----
-parent_task:
-  id: "1.0"
-  title: "Implement Login Service"
-  complexity: 3
-  verify: "npm test -- --grep auth"
-subtasks:
-  - id: "1.1"
-    description: "Create AuthService class"
-    files: "src/services/AuthService.ts"
-  - id: "1.2"
-    description: "Add password validation"
-    files: "src/services/AuthService.ts"
-state_md: |
-  # Execution State
-  ## Cross-Task Learnings
-  (any learnings from previous tasks)
-explore_context: |
-  (content from EXPLORE_CONTEXT.json)
-feature_name: "user-authentication"
-task_file: "/tasks/task-user-authentication.xml"
-domain_skill: "backend"
----
-Execute this parent task. Create atomic commit when complete.
-"""
-)
-```
-
-**This is not optional.** Every parent task = one execution spawn (Codex for complexity 1-2, Task tool for 2.5+).
+**This is not optional.** Every parent task = one Codex Bash execution spawn.
 
 ### Special Case: "Manual Testing" Tasks
 
-Even tasks labeled "manual testing" or "verification" MUST be delegated to execution-agent. The agent will:
+Even tasks labeled "manual testing" or "verification" MUST be delegated to Codex via Bash. Codex will:
 - Run any automated tests/commands in the task
 - Document what manual tests the user should perform
 - Return a structured summary
 
-**Never interpret "manual" as "I should do this myself."** ALL tasks go to execution-agent.
+**Never interpret "manual" as "I should do this myself."** ALL tasks go to Codex via Bash.
 
 ### Self-Check
 
 Before proceeding, verify:
 - [ ] I will NOT edit any code myself
-- [ ] I will use `Task(subagent_type="execution-agent")` for EVERY parent task (including "manual" tasks)
+- [ ] I will use Codex via Bash for EVERY parent task (including "manual" tasks) -- NOT Task tool agents
 - [ ] If I catch myself reading source files, I will STOP and delegate instead
 - [ ] After ALL tasks complete, I will run code review (not ask, just run it)
 - [ ] After code review and CTO-advisor review complete, I will run memory update (not ask, just run it)
@@ -104,7 +71,7 @@ If `.claude/agents/cto.md` is missing or unreadable:
 - Log a warning that CTO guidance is unavailable
 - Continue with existing orchestrator constraints and conservative escalation behavior
 
-CTO personality is **ADDITIVE**. It does not override orchestrator constraints above: you still delegate all code changes and implementation to execution agents.
+CTO personality is **ADDITIVE**. It does not override orchestrator constraints above: you still delegate all code changes and implementation to Codex.
 
 ### Decision Authority
 
@@ -130,8 +97,8 @@ CTO-orchestrator ESCALATES:
 This command acts as a **lightweight orchestrator** rather than a monolithic executor. For each parent task, it:
 
 1. **Reads current state** from STATE.md (cross-task learnings)
-2. **Selects model** based on complexity (Codex medium for 1-2, Sonnet for 3, Codex xhigh for 4-5)
-3. **Spawns execution agent** with fresh context via Task tool
+2. **Selects model** based on complexity (Codex medium for 1-3, Codex xhigh for 4-5)
+3. **Spawns Codex via Bash** with fresh context
 4. **Validates result** (verify passed, commit created)
 5. **Updates STATE.md** with learnings
 6. **Continues** to next parent task
@@ -306,13 +273,13 @@ _Cross-task learnings will be recorded below as parent tasks complete._
 
 ### Creation Timing
 
-Create STATE.md **after** successful XML parsing, **before** spawning first execution agent.
+Create STATE.md **after** successful XML parsing, **before** spawning first Codex task.
 
 ---
 
 ## explore-context.json Loading
 
-Load exploration context to pass to execution agents.
+Load exploration context to pass to Codex.
 
 ### File Location
 
@@ -325,7 +292,7 @@ Load exploration context to pass to execution agents.
 2. If file exists:
    - Parse JSON content
    - Validate structure (similar_features, applicable_patterns, etc.)
-   - Pass to all execution agents
+   - Pass to all Codex invocations
 3. If file missing:
    - Set explore_context to null
    - Log: "explore-context.json not found - agents will use memory system directly"
@@ -362,7 +329,7 @@ Load exploration context to pass to execution agents.
 
 ## Domain Detection & Skill Loading
 
-Load domain-specific skills to guide execution agents with specialized patterns and pitfalls.
+Load domain-specific skills to guide Codex with specialized patterns and pitfalls.
 
 ### Domain Detection Logic
 
@@ -518,8 +485,8 @@ task_file: "/tasks/notification-timeout/task.xml"
 domain_skill: |
   (content from .claude/skills/domain-frontend.md or relevant domain)
 ---
-Execute this parent task following the execution-agent patterns.
-Read .claude/agents/execution-agent.md for the full execution protocol.
+Execute this parent task following the task protocol.
+Read .claude/agents/task-protocol.md for the full execution protocol.
 Create atomic commit when complete.
 Return structured YAML summary with status, commit SHA, and learnings.
 EOF
@@ -551,8 +518,8 @@ task_file: "/tasks/user-validation/task.xml"
 domain_skill: |
   (content from .claude/skills/domain-backend.md or relevant domain)
 ---
-Execute this parent task following the execution-agent patterns.
-Read .claude/agents/execution-agent.md for the full execution protocol.
+Execute this parent task following the task protocol.
+Read .claude/agents/task-protocol.md for the full execution protocol.
 Create atomic commit when complete.
 Return structured YAML summary with status, commit SHA, and learnings.
 EOF
@@ -584,8 +551,8 @@ task_file: "/tasks/auth-refactor/task.xml"
 domain_skill: |
   (content from .claude/skills/domain-backend.md or relevant domain)
 ---
-Execute this parent task following the execution-agent patterns.
-Read .claude/agents/execution-agent.md for the full execution protocol.
+Execute this parent task following the task protocol.
+Read .claude/agents/task-protocol.md for the full execution protocol.
 Create atomic commit when complete.
 Return structured YAML summary with status, commit SHA, and learnings.
 EOF
@@ -602,7 +569,7 @@ When spawning via Codex 5.3 (gpt-5.3-codex with varying reasoning effort):
 - For complexity 1-3 (medium reasoning): `codex -m gpt-5.3-codex exec --full-auto -- "..."` (medium is default)
 - The prompt must be self-contained (Codex doesn't inherit conversation context)
 - Include the domain skill content directly in the prompt
-- Codex will read the execution-agent.md file for the full protocol
+- Codex will read the task-protocol.md file for the full execution protocol
 - Output is captured; parse for status, commit SHA, and learnings
 - GPT-5.3-Codex is 25% faster and uses <50% tokens vs prior versions
 
@@ -884,11 +851,10 @@ executeWave(wave, state_md, explore_context, task_file, wave_id):
       }
     }
 
-    # Spawn agent asynchronously (run_in_background: true)
-    handle = Task tool with:
-      subagent_type: "execution-agent"
-      model: model
-      prompt: YAML(handoff)
+    # Spawn Codex via Bash (run_in_background: true)
+    codex_cmd = buildCodexCommand(model, YAML(handoff))
+    handle = Bash tool with:
+      command: codex_cmd
       run_in_background: true
 
     agent_handles.append({task: task, handle: handle})
@@ -1257,7 +1223,7 @@ Please review changes and commit manually, then resume.
 
 ### Retry Logic
 
-For spawn failures (Task tool errors):
+For spawn failures (Codex errors):
 - Retry up to 2 times with exponential backoff
 - If all retries fail, pause execution and report error
 
@@ -1377,7 +1343,7 @@ After each parent task completes (or is blocked), update the task file to track 
 
 ### Update Process
 
-After execution agent returns:
+After Codex returns:
 
 ```
 1. Read current task XML file
@@ -1456,7 +1422,7 @@ After all tasks complete, you MUST run these steps in order. Do NOT skip them. D
    ↓
 3. CTO TRIAGES FINDINGS (see "Handling Code Review Results" below)
    ↓
-4. FIX AGENTS RUN (spawn execution-agent per finding, same as wave execution)
+4. FIX AGENTS RUN (spawn Codex via Bash per finding, same as wave execution)
    ↓
 5. VERIFY FIXES (re-run verify commands for affected tasks)
    ↓
@@ -1519,6 +1485,7 @@ Only proceed to task completion review after `CRITICAL/HIGH` findings are resolv
 After code review triage and fix verification, invoke a CTO advisor pass to confirm all XML-defined tasks were completed correctly.
 
 ### CTO-Advisor Invocation
+
 
 ```
 Task(
@@ -1654,9 +1621,9 @@ Beginning execution...
    Subtasks: {count}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Spawning execution agent with fresh context and {domain} skill...
+Spawning Codex with fresh context and {domain} skill...
 
-[Agent executes and returns]
+[Codex executes and returns]
 
 ✅ Parent Task {id} completed
    Commit: {commit_sha}
@@ -1735,13 +1702,13 @@ The orchestrator integrates with the AI memory system:
 
 | Memory File | Usage |
 |-------------|-------|
-| `.ai/PATTERNS.md` | Passed to execution agents via EXPLORE_CONTEXT |
-| `.ai/FILES.json` | Passed to execution agents via EXPLORE_CONTEXT |
-| `.ai/ARCHITECTURE.json` | Passed to execution agents via EXPLORE_CONTEXT |
-| `.ai/BUSINESS.json` | Passed to execution agents via EXPLORE_CONTEXT |
+| `.ai/PATTERNS.md` | Passed to Codex via EXPLORE_CONTEXT |
+| `.ai/FILES.json` | Passed to Codex via EXPLORE_CONTEXT |
+| `.ai/ARCHITECTURE.json` | Passed to Codex via EXPLORE_CONTEXT |
+| `.ai/BUSINESS.json` | Passed to Codex via EXPLORE_CONTEXT |
 | `.ai/QUICK.md` | Used for verify commands and build reference |
 
-The orchestrator itself is lightweight - it delegates memory consultation to the execution agents, keeping its own context minimal.
+The orchestrator itself is lightweight - it delegates memory consultation to Codex, keeping its own context minimal.
 
 ---
 
