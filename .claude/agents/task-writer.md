@@ -33,7 +33,7 @@ Instead use specific action titles:
 - "Code Review" (for the mandatory code review task)
 - "Document Test Scenarios" (if test documentation is needed)
 
-The word "Manual" causes the orchestrator to try to execute the task itself instead of delegating to an execution-agent.
+The word "Manual" causes the orchestrator to try to execute the task itself instead of delegating to Codex.
 
 ---
 
@@ -327,7 +327,7 @@ Complexity ratings drive model selection in the orchestrator:
 
 <!-- Subtask complexity is informational -->
 <subtask id="1.1" complexity="2">
-  <!-- Helps execution agent prioritize within parent -->
+  <!-- Helps Codex prioritize within parent -->
 </subtask>
 ```
 
@@ -361,7 +361,7 @@ Complexity ratings drive model selection in the orchestrator:
 
 ### Domain Attribute (Optional Override)
 
-The `domain` attribute on `<parent_task>` provides explicit control over which skill the execution agent uses:
+The `domain` attribute on `<parent_task>` provides explicit control over which domain skill Codex loads:
 
 ```xml
 <!-- Explicit domain override - use security skill even though files look like backend -->
