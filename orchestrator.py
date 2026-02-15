@@ -57,6 +57,10 @@ PARALLEL_LAUNCH_DELAY = 2.0   # seconds between parallel PL launches
 
 logger = logging.getLogger("orchestrator")
 
+# Module-level state for agent I/O logging
+_agent_log_dir: Optional[Path] = None
+_invocation_counter = 0
+
 
 def setup_logging(log_dir: Path, log_level: str = DEFAULT_LOG_LEVEL) -> None:
     """Configure dual logging: structured file + human-friendly stderr."""
@@ -77,6 +81,109 @@ def setup_logging(log_dir: Path, log_level: str = DEFAULT_LOG_LEVEL) -> None:
     logger.addHandler(file_handler)
     logger.addHandler(stderr_handler)
     logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
+
+    # Agent I/O log directory -- captures full context and output per invocation
+    global _agent_log_dir
+    _agent_log_dir = log_dir / "agent-logs"
+    _agent_log_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Agent I/O logs: %s", _agent_log_dir)
+
+
+def _log_agent_io(
+    agent_name: str,
+    cycle: int,
+    context: str,
+    output: Optional[str] = None,
+    stderr: Optional[str] = None,
+    elapsed: Optional[float] = None,
+    exit_code: Optional[int] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Write full agent context and output to timestamped files.
+
+    Creates per-invocation files in tasks/agent-logs/ for retrospective
+    analysis of every prompt sent and response received.
+    """
+    if _agent_log_dir is None:
+        return
+
+    global _invocation_counter
+    _invocation_counter += 1
+    seq = _invocation_counter
+
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    prefix = f"{seq:03d}-{ts}-cycle{cycle:02d}-{agent_name}"
+
+    # Write the context (prompt) sent to the agent
+    ctx_path = _agent_log_dir / f"{prefix}-context.md"
+    ctx_path.write_text(
+        f"# Agent: {agent_name} | Cycle: {cycle} | Invocation: {seq}\n"
+        f"# Timestamp: {ts}\n"
+        f"# Command: claude --print --agent {agent_name} -p <context>\n\n"
+        f"{context}\n",
+        encoding="utf-8",
+    )
+
+    # Write the full output (response) from the agent
+    if output is not None:
+        out_path = _agent_log_dir / f"{prefix}-output.md"
+        meta_lines = [
+            f"# Agent: {agent_name} | Cycle: {cycle} | Invocation: {seq}",
+            f"# Timestamp: {ts}",
+        ]
+        if elapsed is not None:
+            meta_lines.append(f"# Duration: {elapsed:.1f}s")
+        if exit_code is not None:
+            meta_lines.append(f"# Exit code: {exit_code}")
+        meta_lines.append("")
+
+        out_path.write_text(
+            "\n".join(meta_lines) + "\n" + output + "\n",
+            encoding="utf-8",
+        )
+
+    # Write stderr if non-empty
+    if stderr and stderr.strip():
+        err_path = _agent_log_dir / f"{prefix}-stderr.txt"
+        err_path.write_text(stderr, encoding="utf-8")
+
+    # Write error info if invocation failed
+    if error:
+        err_path = _agent_log_dir / f"{prefix}-error.txt"
+        err_path.write_text(
+            f"# Agent: {agent_name} | Cycle: {cycle} | Invocation: {seq}\n"
+            f"# Timestamp: {ts}\n\n"
+            f"{error}\n",
+            encoding="utf-8",
+        )
+
+
+def _capture_session_logs(
+    sprint: Dict[str, Any],
+    project_dir: Path,
+    cycle: int,
+) -> None:
+    """Copy pl-session.log and execution.log from sprint task dir to agent-logs/.
+
+    These logs are written by the PL and execute agents during their sessions
+    via echo-append. Copying them to agent-logs/ provides centralized access
+    for post-hoc diagnosis of model selection and fallback behavior.
+    """
+    if _agent_log_dir is None:
+        return
+
+    sprint_name = sprint.get("name", "unknown")
+    task_dir = project_dir / "tasks" / sprint_name
+
+    for log_name in ("pl-session.log", "execution.log"):
+        src = task_dir / log_name
+        if src.is_file():
+            dest = _agent_log_dir / f"cycle{cycle:02d}-{sprint_name}-{log_name}"
+            try:
+                dest.write_bytes(src.read_bytes())
+                logger.info("Captured %s -> %s", src, dest)
+            except OSError as exc:
+                logger.warning("Failed to capture %s: %s", src, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -545,6 +652,7 @@ def invoke_agent(
     context: str,
     project_dir: Path,
     timeout: int = DEFAULT_PM_TIMEOUT,
+    cycle: int = 0,
 ) -> str:
     """Invoke a Claude agent via CLI and capture stdout.
 
@@ -557,6 +665,7 @@ def invoke_agent(
         context: Context string to pass to the agent
         project_dir: Working directory for the subprocess
         timeout: Maximum time in seconds before killing the agent
+        cycle: Current orchestration cycle number (for log file naming)
 
     Returns:
         The agent's stdout output as a string.
@@ -585,11 +694,19 @@ def invoke_agent(
             "Agent '%s' timed out after %.1fs (limit: %ds)",
             agent_name, elapsed, timeout,
         )
+        _log_agent_io(
+            agent_name, cycle, context,
+            elapsed=elapsed, error=f"Timed out after {elapsed:.1f}s (limit: {timeout}s)",
+        )
         raise
     except FileNotFoundError:
         logger.error(
             "Claude CLI not found. Ensure 'claude' is on your PATH. "
             "Install via: npm install -g @anthropic-ai/claude-code"
+        )
+        _log_agent_io(
+            agent_name, cycle, context,
+            error="Claude CLI ('claude') not found on PATH",
         )
         raise RuntimeError("Claude CLI ('claude') not found on PATH")
 
@@ -597,6 +714,15 @@ def invoke_agent(
     logger.info(
         "Agent '%s' completed in %.1fs (exit code: %d)",
         agent_name, elapsed, result.returncode,
+    )
+
+    # Log full agent I/O for retrospective analysis
+    _log_agent_io(
+        agent_name, cycle, context,
+        output=result.stdout,
+        stderr=result.stderr,
+        elapsed=elapsed,
+        exit_code=result.returncode,
     )
 
     if result.returncode != 0:
@@ -1061,7 +1187,8 @@ def execute_sprints(
         context = build_pl_context(sprint, state.project_dir)
         try:
             output = invoke_agent(
-                "pl", context, state.project_dir, timeout=state.pl_timeout
+                "pl", context, state.project_dir, timeout=state.pl_timeout,
+                cycle=state.cycle_count,
             )
             sig = parse_signal(output)
         except subprocess.TimeoutExpired:
@@ -1082,6 +1209,9 @@ def execute_sprints(
             "Sequential sprint '%s' signal: %s",
             sprint["name"], sig.get("signal", "unknown"),
         )
+
+        # Capture session logs written by PL and execute agents
+        _capture_session_logs(sprint, state.project_dir, state.cycle_count)
 
     # Return to main branch after all sprints
     checkout_main(state.project_dir)
@@ -1187,7 +1317,8 @@ def run_orchestration(state: OrchestratorState) -> int:
 
         try:
             pm_output = invoke_agent(
-                "pm", pm_context, state.project_dir, timeout=state.pm_timeout
+                "pm", pm_context, state.project_dir, timeout=state.pm_timeout,
+                cycle=state.cycle_count,
             )
         except subprocess.TimeoutExpired:
             logger.error("PM agent timed out")
@@ -1215,6 +1346,7 @@ def run_orchestration(state: OrchestratorState) -> int:
             signal_type,
             f" -- {signal_summary}" if signal_summary else "",
         )
+        logger.debug("PM signal parsed: %s", pm_signal)
 
         # 3. Handle PM signal
         if signal_type == "complete":
