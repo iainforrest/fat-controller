@@ -23,6 +23,7 @@ import argparse
 import logging
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -1566,6 +1567,137 @@ def run_orchestration(state: OrchestratorState) -> int:
 # Argument parsing and main entry point
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Post-completion archiving
+# ---------------------------------------------------------------------------
+
+# Files and directories to archive from tasks/ on successful completion.
+# Anything in tasks/ not in this list and not in ARCHIVE_PRESERVE is moved
+# to the archive as a sprint directory.
+ARCHIVE_KNOWN_FILES = {
+    "OUTCOMES.md",
+    "DECISIONS.md",
+    "PROJECT_STATE.md",
+    "ROADMAP.md",
+    "CONTEXT.md",
+    "OUTCOMES_STATE.md",
+    "outcomes-draft.md",
+    "outcomes-refined.md",
+    "outcomes-setup.xml",
+    "orchestrator.log",
+}
+
+# Directories in tasks/ that are always archived as a unit.
+ARCHIVE_KNOWN_DIRS = {
+    "agent-logs",
+    "red-team",
+}
+
+# Entries in tasks/ that must never be moved.
+ARCHIVE_PRESERVE = {
+    "archive",
+    "screenshots",
+}
+
+
+def _derive_archive_name(state: OrchestratorState) -> str:
+    """Derive a human-readable archive folder name from ROADMAP.md or project dir."""
+    roadmap = state.roadmap_path
+    name = None
+    if roadmap.is_file():
+        try:
+            for line in roadmap.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("# "):
+                    # Use the H1 heading, slugified
+                    raw = line[2:].strip()
+                    name = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
+                    break
+        except OSError:
+            pass
+    if not name:
+        name = state.project_dir.name
+    date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return f"{name}-{date_str}"
+
+
+def archive_completed_project(state: OrchestratorState) -> bool:
+    """Archive all orchestrator artifacts into tasks/archive/<name>/.
+
+    Moves known files, known directories, tool-use logs, and any remaining
+    sprint directories. Preserves tasks/archive/ and tasks/screenshots/.
+
+    Returns True on success, False on error.
+    """
+    tasks_dir = state.project_dir / "tasks"
+    if not tasks_dir.is_dir():
+        logger.warning("No tasks/ directory to archive")
+        return False
+
+    archive_name = _derive_archive_name(state)
+    archive_dir = tasks_dir / "archive" / archive_name
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    logger.info("Archiving completed project to %s", archive_dir)
+
+    moved = []
+    errors = []
+
+    # 1. Move known files
+    for filename in ARCHIVE_KNOWN_FILES:
+        src = tasks_dir / filename
+        if src.is_file():
+            try:
+                shutil.move(str(src), str(archive_dir / filename))
+                moved.append(filename)
+            except OSError as exc:
+                errors.append(f"{filename}: {exc}")
+
+    # 2. Move tool-use logs (tool-use.log, tool-use.log.1, etc.)
+    for path in sorted(tasks_dir.glob("tool-use.log*")):
+        if path.is_file():
+            try:
+                shutil.move(str(path), str(archive_dir / path.name))
+                moved.append(path.name)
+            except OSError as exc:
+                errors.append(f"{path.name}: {exc}")
+
+    # 3. Move known directories
+    for dirname in ARCHIVE_KNOWN_DIRS:
+        src = tasks_dir / dirname
+        if src.is_dir():
+            try:
+                shutil.move(str(src), str(archive_dir / dirname))
+                moved.append(f"{dirname}/")
+            except OSError as exc:
+                errors.append(f"{dirname}/: {exc}")
+
+    # 4. Move any remaining sprint directories (anything not preserved)
+    for entry in sorted(tasks_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        if entry.name in ARCHIVE_PRESERVE:
+            continue
+        # Already moved or it's the archive target itself
+        if entry.name in ARCHIVE_KNOWN_DIRS:
+            continue
+        try:
+            shutil.move(str(entry), str(archive_dir / entry.name))
+            moved.append(f"{entry.name}/")
+        except OSError as exc:
+            errors.append(f"{entry.name}/: {exc}")
+
+    # 5. Recreate agent-logs for next run
+    (tasks_dir / "agent-logs").mkdir(parents=True, exist_ok=True)
+
+    if errors:
+        logger.warning("Archive errors: %s", "; ".join(errors))
+    logger.info("Archived %d items to %s", len(moved), archive_dir)
+    for item in moved:
+        logger.debug("  archived: %s", item)
+
+    return len(errors) == 0
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -1688,6 +1820,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     except Exception as exc:
         logger.exception("Unhandled exception in orchestration loop: %s", exc)
         exit_code = 1
+
+    # --- Archive on successful completion ---
+    if exit_code == 0:
+        logger.info("Project completed successfully -- archiving artifacts")
+        try:
+            archive_completed_project(state)
+        except Exception as exc:
+            # Archiving failure should not change the exit code
+            logger.warning("Archiving failed (non-fatal): %s", exc)
 
     logger.info("Orchestrator exiting with code %d", exit_code)
     return exit_code
