@@ -103,6 +103,7 @@ def _log_agent_io(
     elapsed: Optional[float] = None,
     exit_code: Optional[int] = None,
     error: Optional[str] = None,
+    command: Optional[str] = None,
 ) -> None:
     """Write full agent context and output to timestamped files.
 
@@ -121,10 +122,11 @@ def _log_agent_io(
 
     # Write the context (prompt) sent to the agent
     ctx_path = _agent_log_dir / f"{prefix}-context.md"
+    command_line = command or f"claude --print --agent {agent_name} -p <context>"
     ctx_path.write_text(
         f"# Agent: {agent_name} | Cycle: {cycle} | Invocation: {seq}\n"
         f"# Timestamp: {ts}\n"
-        f"# Command: claude --print --agent {agent_name} -p <context>\n\n"
+        f"# Command: {command_line}\n\n"
         f"{context}\n",
         encoding="utf-8",
     )
@@ -801,6 +803,7 @@ class SoftwareHandler(NodeHandler):
                 worktree_path,
                 timeout=max(1, int(config.timeout or DEFAULT_PL_TIMEOUT)),
                 cycle=cycle,
+                model_config=config,
             )
             signal_payload = parse_signal(output)
         except subprocess.TimeoutExpired:
@@ -964,6 +967,7 @@ class ContentHandler(NodeHandler):
                 work_dir,
                 timeout=max(1, int(config.timeout or DEFAULT_PL_TIMEOUT)),
                 cycle=cycle,
+                model_config=config,
             )
             signal_payload = parse_signal(output)
         except subprocess.TimeoutExpired:
@@ -1146,6 +1150,7 @@ class DiscoveryHandler(NodeHandler):
                 work_dir,
                 timeout=max(1, int(config.timeout or DEFAULT_PL_TIMEOUT)),
                 cycle=cycle,
+                model_config=config,
             )
             signal_payload = parse_signal(output)
         except subprocess.TimeoutExpired:
@@ -2986,7 +2991,7 @@ def read_roadmap(state: OrchestratorState) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 def _agent_env() -> Dict[str, str]:
-    """Return a clean environment for spawning Claude agent subprocesses.
+    """Return a clean environment for spawning agent subprocesses.
 
     Strips CLAUDECODE so that `claude --print` doesn't refuse to launch
     when the orchestrator is itself running inside a Claude Code session.
@@ -2995,18 +3000,88 @@ def _agent_env() -> Dict[str, str]:
     env.pop("CLAUDECODE", None)
     return env
 
+
+def _default_tool_profile(provider: str) -> str:
+    """Infer tool profile from provider when profile is omitted."""
+    return "codex" if provider.strip().lower() == "openai" else "claude"
+
+
+def _resolve_invocation_config(
+    tool_profile: str,
+    model_config: Optional[ModelConfig],
+) -> Tuple[str, str, str]:
+    """Resolve effective tool profile, model, and reasoning effort."""
+    resolved_profile = str(tool_profile or "claude").strip().lower() or "claude"
+    model_name = ""
+    reasoning_effort = "medium"
+
+    if model_config is not None:
+        provider = str(model_config.provider or "").strip()
+        configured_profile = str(model_config.tool_profile or "").strip().lower()
+        if configured_profile:
+            resolved_profile = configured_profile
+        elif provider:
+            resolved_profile = _default_tool_profile(provider)
+
+        model_name = str(model_config.model or "").strip()
+        reasoning_effort = (
+            str(model_config.reasoning_effort or "medium").strip().lower()
+            or "medium"
+        )
+
+    return resolved_profile, model_name, reasoning_effort
+
+
+def _build_invoke_command(
+    agent_name: str,
+    context: str,
+    tool_profile: str,
+    model_name: str,
+    reasoning_effort: str,
+) -> Tuple[List[str], str]:
+    """Build a provider-native CLI command for agent invocation."""
+    profile = str(tool_profile or "claude").strip().lower() or "claude"
+    if profile == "claude":
+        return (
+            ["claude", "--print", "--agent", agent_name, "-p", context],
+            "claude",
+        )
+
+    if profile in {"codex", "gpt"}:
+        resolved_model = model_name or "gpt-5.3-codex"
+        cmd = ["codex", "-m", resolved_model]
+        if reasoning_effort != "medium":
+            cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
+        cmd.extend(["exec", "--full-auto", context])
+        return (cmd, "codex")
+
+    logger.warning(
+        "Unknown tool_profile '%s' for agent '%s'; defaulting to Claude CLI",
+        profile,
+        agent_name,
+    )
+    return (
+        ["claude", "--print", "--agent", agent_name, "-p", context],
+        "claude",
+    )
+
 def invoke_agent(
     agent_name: str,
     context: str,
     project_dir: Path,
     timeout: int = DEFAULT_PM_TIMEOUT,
     cycle: int = 0,
+    tool_profile: str = "claude",
+    model_config: Optional[ModelConfig] = None,
 ) -> str:
-    """Invoke a Claude agent via CLI and capture stdout.
+    """Invoke an agent via provider-native CLI and capture stdout.
 
-    Uses `claude --print --agent <name> -p <context>` to run the agent
-    non-interactively. Note: very large context strings may hit the OS
-    ARG_MAX limit; consider writing to a temp file if context exceeds ~128KB.
+    Uses provider-native tools for execution:
+    - `claude --print --agent <name> -p <context>` for Claude profile.
+    - `codex -m <model> exec --full-auto <context>` for codex/gpt profiles.
+
+    If `model_config` is provided, its `tool_profile`, `model`, and
+    `reasoning_effort` determine invocation behavior.
 
     Args:
         agent_name: Agent to invoke (e.g., "pm", "pl")
@@ -3014,6 +3089,8 @@ def invoke_agent(
         project_dir: Working directory for the subprocess
         timeout: Maximum time in seconds before killing the agent
         cycle: Current orchestration cycle number (for log file naming)
+        tool_profile: Tool profile override when model_config is omitted
+        model_config: Optional model configuration for provider-native routing
 
     Returns:
         The agent's stdout output as a string.
@@ -3023,9 +3100,28 @@ def invoke_agent(
         RuntimeError: If the agent exits with a non-zero return code
                       and produces no stdout.
     """
-    cmd = ["claude", "--print", "--agent", agent_name, "-p", context]
+    (
+        resolved_profile,
+        resolved_model,
+        resolved_reasoning,
+    ) = _resolve_invocation_config(tool_profile, model_config)
+    cmd, cli_name = _build_invoke_command(
+        agent_name,
+        context,
+        resolved_profile,
+        resolved_model,
+        resolved_reasoning,
+    )
+    command_for_logs = " ".join(cmd[:-1] + ["<context>"]) if cmd else "<unknown>"
 
-    logger.info("Invoking agent '%s' (timeout: %ds)", agent_name, timeout)
+    logger.info(
+        "Invoking agent '%s' with tool_profile='%s' model='%s' reasoning='%s' (timeout: %ds)",
+        agent_name,
+        resolved_profile,
+        resolved_model or "default",
+        resolved_reasoning,
+        timeout,
+    )
     start_time = time.monotonic()
 
     try:
@@ -3045,19 +3141,28 @@ def invoke_agent(
         )
         _log_agent_io(
             agent_name, cycle, context,
-            elapsed=elapsed, error=f"Timed out after {elapsed:.1f}s (limit: {timeout}s)",
+            elapsed=elapsed,
+            error=f"Timed out after {elapsed:.1f}s (limit: {timeout}s)",
+            command=command_for_logs,
         )
         raise
     except FileNotFoundError:
-        logger.error(
-            "Claude CLI not found. Ensure 'claude' is on your PATH. "
-            "Install via: npm install -g @anthropic-ai/claude-code"
-        )
+        if cli_name == "codex":
+            message = (
+                "Codex CLI not found. Ensure 'codex' is on your PATH and installed."
+            )
+        else:
+            message = (
+                "Claude CLI not found. Ensure 'claude' is on your PATH. "
+                "Install via: npm install -g @anthropic-ai/claude-code"
+            )
+        logger.error(message)
         _log_agent_io(
             agent_name, cycle, context,
-            error="Claude CLI ('claude') not found on PATH",
+            error=message,
+            command=command_for_logs,
         )
-        raise RuntimeError("Claude CLI ('claude') not found on PATH")
+        raise RuntimeError(message)
 
     elapsed = time.monotonic() - start_time
     logger.info(
@@ -3072,6 +3177,7 @@ def invoke_agent(
         stderr=result.stderr,
         elapsed=elapsed,
         exit_code=result.returncode,
+        command=command_for_logs,
     )
 
     if result.returncode != 0:
@@ -3952,114 +4058,228 @@ def _resolve_discovery_context_artifact(
     return None
 
 
+def _collect_upstream_execution_path(
+    graph_engine: GraphEngine,
+    node_id: str,
+) -> List[str]:
+    """Collect all transitive upstream node IDs for a node."""
+    queue: deque[str] = deque(sorted(graph_engine.get_upstream_nodes(node_id)))
+    seen: Set[str] = set()
+    ordered: List[str] = []
+
+    while queue:
+        current = queue.popleft()
+        if current in seen:
+            continue
+        seen.add(current)
+        ordered.append(current)
+
+        for upstream_id in sorted(graph_engine.get_upstream_nodes(current)):
+            if upstream_id not in seen:
+                queue.append(upstream_id)
+
+    return ordered
+
+
+def estimate_token_count(text: str) -> int:
+    """Estimate token count from character length using a 4:1 ratio."""
+    return max(0, len(text) // 4)
+
+
+def build_node_context(
+    node: GraphNode,
+    graph: Graph,
+    checkpoint_mgr: "CheckpointManager",
+    project_dir: Path,
+    fidelity: ContextFidelityMode = ContextFidelityMode.MINIMAL,
+) -> str:
+    """Build node context with minimal, partial, and full fidelity modes."""
+    graph_engine = GraphEngine(graph)
+    fidelity_mode = _coerce_enum(
+        ContextFidelityMode,
+        fidelity,
+        ContextFidelityMode.MINIMAL,
+        f"graph node '{node.id}' context_fidelity",
+    )
+
+    node_payload = {
+        "id": node.id,
+        "name": node.name,
+        "type": node.type.value if isinstance(node.type, Enum) else str(node.type),
+        "class": node.node_class,
+        "handler": node.handler,
+        "inputs": node.inputs,
+        "criteria": list(node.criteria),
+        "complexity_hint": node.complexity_hint,
+        "prd_path": node.prd_path,
+        "branch": node.branch,
+        "output_path": node.output_path,
+        "source_materials": list(node.source_materials),
+    }
+
+    outcomes_path = project_dir / "tasks" / "OUTCOMES.md"
+    outcomes_summary = "Unavailable"
+    if outcomes_path.is_file():
+        try:
+            outcomes_text = outcomes_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            logger.warning("Failed to read OUTCOMES.md for node context: %s", exc)
+        else:
+            if outcomes_text:
+                outcomes_summary = outcomes_text[:500]
+
+    memory_paths: List[str] = []
+    for path_text in (
+        ".ai/ARCHITECTURE.json",
+        ".ai/FILES.json",
+        ".ai/PATTERNS.md",
+        ".ai/QUICK.md",
+        ".ai/BUSINESS.json",
+    ):
+        exists = (project_dir / path_text).is_file()
+        suffix = "" if exists else " (missing)"
+        memory_paths.append(f"- {path_text}{suffix}")
+
+    lines = [
+        f"NODE_CONTEXT_FIDELITY: {fidelity_mode.value}",
+        "NODE_PARAMETERS:",
+        json.dumps(node_payload, indent=2, sort_keys=True, ensure_ascii=True),
+        "PROJECT_CONTEXT:",
+        f"OUTCOMES_SUMMARY: {outcomes_summary}",
+        "MEMORY_SYSTEM_PATHS:",
+    ] + memory_paths
+
+    direct_upstream_nodes = sorted(graph_engine.get_upstream_nodes(node.id))
+    if fidelity_mode in (ContextFidelityMode.PARTIAL, ContextFidelityMode.FULL):
+        upstream_summaries: List[Tuple[str, str]] = []
+        discovery_contents: List[Tuple[str, str, str]] = []
+
+        for upstream_id in direct_upstream_nodes:
+            summary = checkpoint_mgr.get_output_summary(upstream_id)
+            summary_text = str(summary or "").strip()
+            if summary_text:
+                if fidelity_mode == ContextFidelityMode.PARTIAL:
+                    summary_text = summary_text[:500]
+                upstream_summaries.append((upstream_id, summary_text))
+
+            upstream_node = graph.nodes.get(upstream_id)
+            is_discovery = (
+                upstream_node is not None and upstream_node.type == NodeType.DISCOVERY
+            )
+            if not is_discovery:
+                continue
+
+            resolved = _resolve_discovery_context_artifact(
+                upstream_id,
+                checkpoint_mgr,
+                project_dir,
+            )
+            if resolved is None:
+                continue
+
+            relative_path, absolute_path = resolved
+            try:
+                context_text = absolute_path.read_text(encoding="utf-8").strip()
+            except OSError as exc:
+                logger.warning(
+                    "Failed to read CONTEXT.md for discovery node '%s': %s",
+                    upstream_id,
+                    exc,
+                )
+                continue
+
+            if context_text:
+                discovery_contents.append((upstream_id, relative_path, context_text))
+                logger.info(
+                    "Including CONTEXT.md from discovery node '%s' in context for '%s'",
+                    upstream_id,
+                    node.id,
+                )
+
+        if upstream_summaries:
+            lines.append("UPSTREAM_NODE_SUMMARIES:")
+            for upstream_id, text in upstream_summaries:
+                lines.append(f"- {upstream_id}: {text}")
+
+        if discovery_contents:
+            lines.append("DISCOVERY_CONTEXT_CONTENT:")
+            for upstream_id, path_text, text in discovery_contents:
+                lines.append(f"--- BEGIN {upstream_id} ({path_text}) ---")
+                lines.append(text)
+                lines.append(f"--- END {upstream_id} ---")
+
+    if fidelity_mode == ContextFidelityMode.FULL:
+        all_upstream_nodes = _collect_upstream_execution_path(graph_engine, node.id)
+        full_outputs: List[Tuple[str, str]] = []
+        for upstream_id in all_upstream_nodes:
+            summary = checkpoint_mgr.get_output_summary(upstream_id)
+            summary_text = str(summary or "").strip()
+            if summary_text:
+                full_outputs.append((upstream_id, summary_text))
+
+        if full_outputs:
+            lines.append("FULL_UPSTREAM_OUTPUT:")
+            for upstream_id, text in full_outputs:
+                lines.append(f"--- BEGIN OUTPUT {upstream_id} ---")
+                lines.append(text)
+                lines.append(f"--- END OUTPUT {upstream_id} ---")
+
+    context = "\n".join(lines)
+    estimated_tokens = estimate_token_count(context)
+    if fidelity_mode == ContextFidelityMode.MINIMAL and estimated_tokens > 30000:
+        logger.warning(
+            "Minimal context target exceeded for node '%s' (~%d tokens > 30K target)",
+            node.id,
+            estimated_tokens,
+        )
+    if fidelity_mode == ContextFidelityMode.PARTIAL and estimated_tokens > 60000:
+        logger.warning(
+            "Partial context target exceeded for node '%s' (~%d tokens > 60K target)",
+            node.id,
+            estimated_tokens,
+        )
+    if fidelity_mode == ContextFidelityMode.FULL and estimated_tokens > 100000:
+        logger.warning(
+            "Full context exceeds 100K tokens, downgrading to partial for node '%s' (~%d tokens)",
+            node.id,
+            estimated_tokens,
+        )
+        return build_node_context(
+            node=node,
+            graph=graph,
+            checkpoint_mgr=checkpoint_mgr,
+            project_dir=project_dir,
+            fidelity=ContextFidelityMode.PARTIAL,
+        )
+
+    logger.info(
+        "Built node context for '%s' with fidelity='%s' (~%d tokens)",
+        node.id,
+        fidelity_mode.value,
+        estimated_tokens,
+    )
+    return context
+
+
 def _build_node_context(
     node: GraphNode,
     graph_engine: GraphEngine,
     checkpoint_manager: "CheckpointManager",
     project_dir: Path,
 ) -> str:
-    """Build node context according to the configured fidelity mode."""
-    fidelity = _coerce_enum(
-        ContextFidelityMode,
-        node.context_fidelity,
-        ContextFidelityMode.MINIMAL,
-        f"graph node '{node.id}' context_fidelity",
+    """Backward-compatible wrapper around public build_node_context()."""
+    return build_node_context(
+        node=node,
+        graph=graph_engine.graph,
+        checkpoint_mgr=checkpoint_manager,
+        project_dir=project_dir,
+        fidelity=_coerce_enum(
+            ContextFidelityMode,
+            node.context_fidelity,
+            ContextFidelityMode.MINIMAL,
+            f"graph node '{node.id}' context_fidelity",
+        ),
     )
-
-    upstream_nodes = sorted(graph_engine.get_upstream_nodes(node.id))
-    if not upstream_nodes:
-        return ""
-
-    summaries: List[Tuple[str, str]] = []
-    discovery_references: List[Tuple[str, str]] = []
-    discovery_contents: List[Tuple[str, str, str]] = []
-
-    for upstream_id in upstream_nodes:
-        upstream_node = graph_engine.graph.nodes.get(upstream_id)
-        is_discovery = (
-            upstream_node is not None and upstream_node.type == NodeType.DISCOVERY
-        )
-
-        if is_discovery:
-            resolved = _resolve_discovery_context_artifact(
-                upstream_id,
-                checkpoint_manager,
-                project_dir,
-            )
-            if resolved is not None:
-                relative_path, absolute_path = resolved
-                if fidelity == ContextFidelityMode.MINIMAL:
-                    discovery_references.append((upstream_id, relative_path))
-                else:
-                    try:
-                        file_text = absolute_path.read_text(encoding="utf-8").strip()
-                    except OSError as exc:
-                        logger.warning(
-                            "Failed to read CONTEXT.md for discovery node '%s': %s",
-                            upstream_id,
-                            exc,
-                        )
-                    else:
-                        if file_text:
-                            content = (
-                                file_text[:2000]
-                                if fidelity == ContextFidelityMode.PARTIAL
-                                else file_text
-                            )
-                            discovery_contents.append(
-                                (upstream_id, relative_path, content)
-                            )
-                            logger.info(
-                                "Including CONTEXT.md from discovery node '%s' in context for '%s'",
-                                upstream_id,
-                                node.id,
-                            )
-
-        if fidelity == ContextFidelityMode.MINIMAL:
-            continue
-
-        summary = checkpoint_manager.get_output_summary(upstream_id)
-        if summary is None:
-            continue
-        text = str(summary).strip()
-        if text:
-            summaries.append((upstream_id, text))
-
-    if fidelity == ContextFidelityMode.MINIMAL:
-        if not discovery_references:
-            return ""
-        lines = [
-            f"UPSTREAM_CONTEXT_FIDELITY: {fidelity.value}",
-            "DISCOVERY_CONTEXT_REFERENCES:",
-        ]
-        for upstream_id, path_text in discovery_references:
-            lines.append(f"- {upstream_id}: {path_text}")
-        return "\n".join(lines)
-
-    if not summaries and not discovery_contents:
-        return ""
-
-    if fidelity == ContextFidelityMode.PARTIAL:
-        clipped = [
-            (upstream_id, text[:500])
-            for upstream_id, text in summaries
-        ]
-    else:
-        clipped = summaries
-
-    lines = [f"UPSTREAM_CONTEXT_FIDELITY: {fidelity.value}"]
-    if clipped:
-        lines.append("UPSTREAM_NODE_SUMMARIES:")
-        for upstream_id, text in clipped:
-            lines.append(f"- {upstream_id}: {text}")
-    if discovery_contents:
-        lines.append("DISCOVERY_CONTEXT_CONTENT:")
-        for upstream_id, path_text, text in discovery_contents:
-            lines.append(f"--- BEGIN {upstream_id} ({path_text}) ---")
-            lines.append(text)
-            lines.append(f"--- END {upstream_id} ---")
-
-    return "\n".join(lines)
 
 
 def _node_outcome_to_result(

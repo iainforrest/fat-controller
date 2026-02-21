@@ -232,6 +232,155 @@ recovery_suggestion: "{How to fix it}"
 ---ORCHESTRATOR_SIGNAL---
 ```
 
+#### Signal Type: `next_graph`
+
+Use `next_graph` for non-linear pipelines. `next_task` remains fully supported and is still preferred for simple linear sprint plans.
+
+When to use each:
+- `next_task`: Simple linear sprints (backward compatible, default choice).
+- `next_graph`: Parallelism, branching, gates, discovery-first planning, or other DAG behavior.
+
+Node type reference:
+- `task`: Standard implementation node.
+- `discovery`: Approach-finding node that produces context for downstream work.
+- `gate`: Validation node that checks measurable criteria before continuing.
+
+Required node fields:
+- `id`
+- `name`
+- `type`
+- `class`
+- `handler`
+
+Edge format:
+- `source`: Upstream node id.
+- `target`: Downstream node id.
+- `condition`: Edge condition string (use `"always"` unless conditional routing is needed).
+
+```yaml
+---ORCHESTRATOR_SIGNAL---
+signal: next_graph
+domain: software
+summary: "{Brief description of planned execution graph}"
+nodes:
+  - id: "discover-approach"
+    name: "Discover approach"
+    type: discovery
+    class: planning
+    handler: discovery
+    context_fidelity: minimal
+    inputs:
+      outcome: "{Target outcome text}"
+  - id: "implement-core"
+    name: "Implement core"
+    type: task
+    class: implementation
+    handler: software
+    context_fidelity: partial
+  - id: "validate-goal"
+    name: "Validate goal"
+    type: gate
+    class: quality
+    handler: software
+    criteria:
+      - "command passes: python3 -m py_compile orchestrator.py"
+edges:
+  - source: "discover-approach"
+    target: "implement-core"
+    condition: "always"
+  - source: "implement-core"
+    target: "validate-goal"
+    condition: "always"
+---ORCHESTRATOR_SIGNAL---
+```
+
+Example software graph:
+```yaml
+signal: next_graph
+domain: software
+summary: "Discover architecture, implement API and UI in parallel, then validate."
+nodes:
+  - id: discover
+    name: Architecture discovery
+    type: discovery
+    class: planning
+    handler: discovery
+  - id: api
+    name: Implement API
+    type: task
+    class: implementation
+    handler: software
+  - id: ui
+    name: Implement UI
+    type: task
+    class: implementation
+    handler: software
+  - id: gate
+    name: Integration gate
+    type: gate
+    class: quality
+    handler: software
+edges:
+  - source: discover
+    target: api
+    condition: always
+  - source: discover
+    target: ui
+    condition: always
+  - source: api
+    target: gate
+    condition: always
+  - source: ui
+    target: gate
+    condition: always
+```
+
+Example content graph:
+```yaml
+signal: next_graph
+domain: content
+summary: "Discover angle, draft and research in parallel, then final QA gate."
+nodes:
+  - id: discover
+    name: Topic discovery
+    type: discovery
+    class: planning
+    handler: discovery
+  - id: research
+    name: Gather references
+    type: task
+    class: research
+    handler: content
+  - id: draft
+    name: Draft article
+    type: task
+    class: writing
+    handler: content
+  - id: qa
+    name: Editorial gate
+    type: gate
+    class: quality
+    handler: content
+edges:
+  - source: discover
+    target: research
+    condition: always
+  - source: discover
+    target: draft
+    condition: always
+  - source: research
+    target: qa
+    condition: always
+  - source: draft
+    target: qa
+    condition: always
+```
+
+Guidance:
+- Start simple: prefer graphs with 3-5 nodes.
+- Prefer `next_task` linear planning unless the project genuinely needs DAG behavior.
+- `next_graph` is an addition, not a replacement for `next_task`.
+
 ## Decision Policy
 
 ### No-Assumptions Rule
