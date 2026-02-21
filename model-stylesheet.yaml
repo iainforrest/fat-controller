@@ -1,0 +1,78 @@
+version: 1
+defaults:
+  timeout: 7200
+  context_fidelity: minimal
+  max_gate_retries: 3
+classes:
+  planning:
+    provider: anthropic
+    model: claude-opus-4-6
+    reasoning_effort: xhigh
+    tool_profile: claude
+    timeout: 7200
+    fallback:
+      - provider: openai
+        model: gpt-5.3-codex
+        reasoning_effort: xhigh
+        tool_profile: codex
+        timeout: 7200
+  implementation:
+    provider: openai
+    model: gpt-5.3-codex
+    reasoning_effort: medium
+    tool_profile: codex
+    timeout: 7200
+    fallback:
+      - provider: anthropic
+        model: claude-sonnet-4-6
+        reasoning_effort: medium
+        tool_profile: claude
+        timeout: 7200
+  implementation-complex:
+    provider: openai
+    model: gpt-5.3-codex
+    reasoning_effort: xhigh
+    tool_profile: codex
+    timeout: 7200
+  review:
+    provider: anthropic
+    model: claude-opus-4-6
+    reasoning_effort: xhigh
+    tool_profile: claude
+    timeout: 7200
+  gate:
+    provider: anthropic
+    model: claude-sonnet-4-6
+    reasoning_effort: medium
+    tool_profile: claude
+    timeout: 7200
+  content-draft:
+    provider: anthropic
+    model: claude-opus-4-6
+    reasoning_effort: medium
+    tool_profile: claude
+    timeout: 7200
+  discovery:
+    provider: anthropic
+    model: claude-opus-4-6
+    reasoning_effort: xhigh
+    tool_profile: claude
+    timeout: 7200
+  discovery-simple:
+    provider: anthropic
+    model: claude-sonnet-4-6
+    reasoning_effort: medium
+    tool_profile: claude
+    timeout: 7200
+  research:
+    provider: anthropic
+    model: claude-opus-4-6
+    reasoning_effort: xhigh
+    tool_profile: claude
+    timeout: 7200
+  default:
+    provider: openai
+    model: gpt-5.3-codex
+    reasoning_effort: medium
+    tool_profile: codex
+    timeout: 7200

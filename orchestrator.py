@@ -1075,6 +1075,380 @@ class CheckpointManager:
 
 
 # ---------------------------------------------------------------------------
+# Model stylesheet loader
+# ---------------------------------------------------------------------------
+
+class StylesheetLoader:
+    """Load and resolve model configuration classes with fallback chains."""
+
+    def __init__(self, stylesheet_path: Optional[str]):
+        self.logger = logging.getLogger("orchestrator")
+        self.stylesheet_path = Path(stylesheet_path).expanduser() if stylesheet_path else None
+        self._defaults: Dict[str, Any] = {
+            "timeout": 7200,
+            "context_fidelity": "minimal",
+            "max_gate_retries": 3,
+        }
+        self._classes: Dict[str, ModelConfig] = self._build_default_classes()
+
+        if self.stylesheet_path is None or not self.stylesheet_path.is_file():
+            self.logger.info("Using default model stylesheet (no file found)")
+            return
+
+        try:
+            payload = self._parse_stylesheet_yaml(
+                self.stylesheet_path.read_text(encoding="utf-8")
+            )
+            parsed_defaults = payload.get("defaults")
+            if isinstance(parsed_defaults, dict):
+                self._defaults = parsed_defaults
+
+            parsed_classes = payload.get("classes")
+            if isinstance(parsed_classes, dict) and parsed_classes:
+                self._classes = parsed_classes
+            else:
+                self.logger.warning(
+                    "Model stylesheet '%s' did not define any valid classes; using defaults",
+                    self.stylesheet_path,
+                )
+                self._classes = self._build_default_classes()
+
+            self.logger.info(
+                "Loaded model stylesheet: %d classes defined", len(self._classes)
+            )
+        except OSError as exc:
+            self.logger.warning(
+                "Failed to read model stylesheet '%s': %s. Using defaults.",
+                self.stylesheet_path,
+                exc,
+            )
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to parse model stylesheet '%s': %s. Using defaults.",
+                self.stylesheet_path,
+                exc,
+            )
+
+    def select(self, node_class: str) -> ModelConfig:
+        """Resolve model config by node class, then default, then hardcoded fallback."""
+        normalized = str(node_class or "").strip()
+
+        config = self._classes.get(normalized)
+        if config is None:
+            config = self._classes.get("default")
+        if config is None:
+            return self._hardcoded_fallback()
+
+        return self._clone_model_config(config)
+
+    def get_fallback_chain(self, node_class: str) -> List[ModelConfig]:
+        """Return primary model followed by first-order fallback configs."""
+        primary = self.select(node_class)
+        return [primary] + list(primary.fallback)
+
+    def _parse_stylesheet_yaml(self, text: str) -> Dict[str, Any]:
+        """Parse and validate model-stylesheet.yaml payload."""
+        parsed = _parse_simple_yaml(text)
+        if not isinstance(parsed, dict):
+            raise ValueError("Stylesheet payload must be a YAML object")
+
+        defaults = self._parse_defaults(parsed.get("defaults"))
+        classes_raw = parsed.get("classes", {})
+        if not isinstance(classes_raw, dict):
+            raise ValueError("Stylesheet 'classes' must be an object")
+
+        classes: Dict[str, ModelConfig] = {}
+        for raw_class_name, raw_entry in classes_raw.items():
+            class_name = str(raw_class_name).strip()
+            if not class_name:
+                self.logger.warning("Skipping stylesheet class with empty name")
+                continue
+            if not isinstance(raw_entry, dict):
+                self.logger.warning(
+                    "Stylesheet class '%s' must be an object; got %s",
+                    class_name,
+                    type(raw_entry).__name__,
+                )
+                continue
+
+            model_config = self._parse_model_entry(class_name, raw_entry, defaults)
+            if model_config is None:
+                continue
+            classes[class_name] = model_config
+
+        return {
+            "version": parsed.get("version", 1),
+            "defaults": defaults,
+            "classes": classes,
+        }
+
+    def _parse_defaults(self, defaults_raw: Any) -> Dict[str, Any]:
+        """Parse stylesheet defaults block."""
+        if defaults_raw is None:
+            self.logger.warning(
+                "Stylesheet missing optional top-level 'defaults' block; using built-ins"
+            )
+            return dict(self._defaults)
+
+        if not isinstance(defaults_raw, dict):
+            self.logger.warning(
+                "Stylesheet 'defaults' must be an object; got %s. Using built-ins.",
+                type(defaults_raw).__name__,
+            )
+            return dict(self._defaults)
+
+        timeout = self._coerce_timeout(defaults_raw.get("timeout"), 7200, "defaults")
+        context_fidelity = str(
+            defaults_raw.get("context_fidelity", "minimal")
+        ).strip() or "minimal"
+        max_gate_retries = self._coerce_int(
+            defaults_raw.get("max_gate_retries"), 3, "defaults.max_gate_retries"
+        )
+
+        return {
+            "timeout": timeout,
+            "context_fidelity": context_fidelity,
+            "max_gate_retries": max_gate_retries,
+        }
+
+    def _parse_model_entry(
+        self,
+        entry_name: str,
+        entry: Dict[str, Any],
+        defaults: Dict[str, Any],
+    ) -> Optional[ModelConfig]:
+        """Parse one model class or fallback entry."""
+        provider = str(entry.get("provider", "")).strip()
+        model = str(entry.get("model", "")).strip()
+        if not provider or not model:
+            self.logger.warning(
+                "Stylesheet entry '%s' missing required fields 'provider' and/or 'model'; skipping",
+                entry_name,
+            )
+            return None
+
+        if "reasoning_effort" not in entry:
+            self.logger.warning(
+                "Stylesheet entry '%s' missing optional field 'reasoning_effort'; defaulting to 'medium'",
+                entry_name,
+            )
+        reasoning_effort = (
+            str(entry.get("reasoning_effort", "medium")).strip() or "medium"
+        )
+
+        if "tool_profile" not in entry:
+            self.logger.warning(
+                "Stylesheet entry '%s' missing optional field 'tool_profile'; inferring from provider",
+                entry_name,
+            )
+        tool_profile = str(
+            entry.get("tool_profile", self._default_tool_profile(provider))
+        ).strip() or self._default_tool_profile(provider)
+
+        timeout_default = self._coerce_int(defaults.get("timeout"), 7200, "defaults.timeout")
+        if "timeout" not in entry:
+            self.logger.warning(
+                "Stylesheet entry '%s' missing optional field 'timeout'; defaulting to %d",
+                entry_name,
+                timeout_default,
+            )
+        timeout = self._coerce_timeout(
+            entry.get("timeout"), timeout_default, f"{entry_name}.timeout"
+        )
+
+        fallback_entries = entry.get("fallback", [])
+        fallback_models: List[ModelConfig] = []
+        if fallback_entries in (None, ""):
+            fallback_entries = []
+        if isinstance(fallback_entries, list):
+            for idx, fallback_entry in enumerate(fallback_entries):
+                if not isinstance(fallback_entry, dict):
+                    self.logger.warning(
+                        "Stylesheet entry '%s' fallback index %d must be an object; got %s",
+                        entry_name,
+                        idx,
+                        type(fallback_entry).__name__,
+                    )
+                    continue
+                fallback_name = f"{entry_name}.fallback[{idx}]"
+                fallback_model = self._parse_model_entry(
+                    fallback_name,
+                    fallback_entry,
+                    defaults,
+                )
+                if fallback_model is not None:
+                    # Keep fallback depth shallow in the chain list.
+                    fallback_model.fallback = []
+                    fallback_models.append(fallback_model)
+        elif "fallback" in entry:
+            self.logger.warning(
+                "Stylesheet entry '%s' field 'fallback' must be a list; got %s",
+                entry_name,
+                type(fallback_entries).__name__,
+            )
+
+        return ModelConfig(
+            provider=provider,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            tool_profile=tool_profile,
+            timeout=timeout,
+            fallback=fallback_models,
+        )
+
+    def _build_default_classes(self) -> Dict[str, ModelConfig]:
+        """Build hardcoded defaults for environments without stylesheet file."""
+        timeout = 7200
+        classes: Dict[str, ModelConfig] = {
+            "planning": ModelConfig(
+                provider="anthropic",
+                model="claude-opus-4-6",
+                reasoning_effort="xhigh",
+                tool_profile="claude",
+                timeout=timeout,
+                fallback=[
+                    ModelConfig(
+                        provider="openai",
+                        model="gpt-5.3-codex",
+                        reasoning_effort="xhigh",
+                        tool_profile="codex",
+                        timeout=timeout,
+                    )
+                ],
+            ),
+            "implementation": ModelConfig(
+                provider="openai",
+                model="gpt-5.3-codex",
+                reasoning_effort="medium",
+                tool_profile="codex",
+                timeout=timeout,
+                fallback=[
+                    ModelConfig(
+                        provider="anthropic",
+                        model="claude-sonnet-4-6",
+                        reasoning_effort="medium",
+                        tool_profile="claude",
+                        timeout=timeout,
+                    )
+                ],
+            ),
+            "implementation-complex": ModelConfig(
+                provider="openai",
+                model="gpt-5.3-codex",
+                reasoning_effort="xhigh",
+                tool_profile="codex",
+                timeout=timeout,
+            ),
+            "review": ModelConfig(
+                provider="anthropic",
+                model="claude-opus-4-6",
+                reasoning_effort="xhigh",
+                tool_profile="claude",
+                timeout=timeout,
+            ),
+            "gate": ModelConfig(
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                reasoning_effort="medium",
+                tool_profile="claude",
+                timeout=timeout,
+            ),
+            "content-draft": ModelConfig(
+                provider="anthropic",
+                model="claude-opus-4-6",
+                reasoning_effort="medium",
+                tool_profile="claude",
+                timeout=timeout,
+            ),
+            "discovery": ModelConfig(
+                provider="anthropic",
+                model="claude-opus-4-6",
+                reasoning_effort="xhigh",
+                tool_profile="claude",
+                timeout=timeout,
+            ),
+            "discovery-simple": ModelConfig(
+                provider="anthropic",
+                model="claude-sonnet-4-6",
+                reasoning_effort="medium",
+                tool_profile="claude",
+                timeout=timeout,
+            ),
+            "research": ModelConfig(
+                provider="anthropic",
+                model="claude-opus-4-6",
+                reasoning_effort="xhigh",
+                tool_profile="claude",
+                timeout=timeout,
+            ),
+            "default": self._hardcoded_fallback(),
+        }
+        return classes
+
+    @staticmethod
+    def _default_tool_profile(provider: str) -> str:
+        """Infer tool profile from provider when omitted in stylesheet."""
+        return "codex" if provider.strip().lower() == "openai" else "claude"
+
+    @staticmethod
+    def _coerce_int(raw_value: Any, default: int, label: str) -> int:
+        """Parse integer fields with fallback and warning."""
+        try:
+            return int(raw_value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Invalid integer for '%s': %r. Defaulting to %d.",
+                label,
+                raw_value,
+                default,
+            )
+            return default
+
+    def _coerce_timeout(self, raw_value: Any, default: int, label: str) -> int:
+        """Parse timeout values ensuring positive integers."""
+        if raw_value is None or raw_value == "":
+            return default
+
+        timeout = self._coerce_int(raw_value, default, label)
+        if timeout <= 0:
+            self.logger.warning(
+                "Invalid timeout for '%s': %r. Defaulting to %d.",
+                label,
+                raw_value,
+                default,
+            )
+            return default
+        return timeout
+
+    @staticmethod
+    def _clone_model_config(config: ModelConfig) -> ModelConfig:
+        """Copy model config deeply enough to avoid mutating loader cache."""
+        return ModelConfig(
+            provider=config.provider,
+            model=config.model,
+            reasoning_effort=config.reasoning_effort,
+            tool_profile=config.tool_profile,
+            timeout=config.timeout,
+            fallback=[
+                StylesheetLoader._clone_model_config(fallback)
+                for fallback in config.fallback
+            ],
+        )
+
+    @staticmethod
+    def _hardcoded_fallback() -> ModelConfig:
+        """Return built-in fallback when class selection misses."""
+        return ModelConfig(
+            provider="openai",
+            model="gpt-5.3-codex",
+            reasoning_effort="medium",
+            tool_profile="codex",
+            timeout=7200,
+            fallback=[],
+        )
+
+
+# ---------------------------------------------------------------------------
 # 7.6 -- Structured signal parser
 # ---------------------------------------------------------------------------
 
