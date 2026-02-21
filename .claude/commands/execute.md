@@ -1168,7 +1168,7 @@ The core execution loop uses **wave-based parallel execution**.
    - Run and verify fix agents as needed
    - Run CTO-advisor task completion review
    - Run memory update
-   - Offer archive workflow
+   - Handle archive workflow (prompt only for standalone /execute runs)
 ```
 
 ### Sequential Fallback
@@ -1545,7 +1545,20 @@ Pass STATE.md content as context for the update agent.
 
 ## Post-Execution: Archive Workflow
 
-After memory update, offer to archive task files.
+After memory update, decide archive behavior based on execution context.
+
+### Orchestration Detection (PL-Triggered Runs)
+
+If running under orchestration (the `SPRINT_PRD` context variable is set), this execution was invoked by PL and should not prompt for per-feature archiving.
+
+When `SPRINT_PRD` is present (with `BRANCH` typically present as well):
+
+```
+Skip archive prompt. The orchestrator handles project-level archiving on completion.
+Proceed directly to execution summary.
+```
+
+Only run the archive prompt below for standalone `/execute feature-name` runs.
 
 ### User Prompt
 
@@ -1670,7 +1683,7 @@ Running code review...
 - [ ] All parent tasks completed
 - [ ] Code review passed
 - [ ] Memory system updated
-- [ ] User prompted for archive
+- [ ] Archive workflow handled (prompted for standalone runs, skipped for orchestrated runs)
 
 ---
 

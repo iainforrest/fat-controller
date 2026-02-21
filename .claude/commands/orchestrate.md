@@ -22,15 +22,43 @@ This directory is not a git repository. Initialize with `git init` first.
 ```
 Stop here.
 
-### 2. Check OUTCOMES.md
+### 2. Check Project OUTCOMES.md and Detect Slug
 
-Check if `tasks/OUTCOMES.md` exists and is non-empty.
+Scan for non-empty outcomes files at `tasks/*/OUTCOMES.md`, excluding `tasks/archive/`.
 
-If missing or empty:
+Use Bash:
+
+```bash
+mapfile -t OUTCOMES_FILES < <(find tasks -mindepth 2 -maxdepth 2 -type f -name OUTCOMES.md ! -path "tasks/archive/*" -size +0c | sort)
 ```
-No outcomes defined yet. Run /outcomes first to define what this project should deliver, then come back to /orchestrate.
+
+Then branch:
+
+- If count is `0`, show:
+```
+No outcomes defined yet. Run /outcomes first.
 ```
 Stop here.
+
+- If count is `1`, auto-detect the project slug:
+```bash
+PROJECT_SLUG="$(basename "$(dirname "${OUTCOMES_FILES[0]}")")"
+```
+Continue.
+
+- If count is `>1`, ask user which project to orchestrate using AskUserQuestion:
+```
+question: "Multiple project outcomes were found. Which project should /orchestrate run?"
+header: "Project"
+options:
+  - label: "{slug-1}"
+    description: "Use tasks/{slug-1}/OUTCOMES.md"
+  - label: "{slug-2}"
+    description: "Use tasks/{slug-2}/OUTCOMES.md"
+  - ... one option per detected slug
+```
+
+Set `PROJECT_SLUG` from the selected option and continue.
 
 ### 3. Check VALUES.md
 
@@ -134,12 +162,12 @@ fi
 ### Launch in tmux
 
 ```bash
-tmux new-session -d -s {SESSION_NAME} "python3 {ORCH} {project_dir} --skip-values-check 2>&1 | tee tasks/orchestrator.log; echo ''; echo '--- Orchestrator exited. Session will close in 30 seconds. ---'; sleep 30"
+tmux new-session -d -s {SESSION_NAME} "python3 {ORCH} {project_dir} --project {PROJECT_SLUG} --skip-values-check 2>&1 | tee tasks/{PROJECT_SLUG}/orchestrator.log; echo ''; echo '--- Orchestrator exited. Session will close in 30 seconds. ---'; sleep 30"
 ```
 
 The `--skip-values-check` flag is used because we already handled the VALUES.md check above with better UX.
 
-The session auto-closes 30 seconds after the orchestrator exits. All output is preserved in `tasks/orchestrator.log`. If someone is attached and watching, they have 30 seconds to read the final output before the session closes.
+The session auto-closes 30 seconds after the orchestrator exits. All output is preserved in `tasks/{PROJECT_SLUG}/orchestrator.log`. If someone is attached and watching, they have 30 seconds to read the final output before the session closes.
 
 ### Verify launch
 
@@ -149,7 +177,7 @@ After running the tmux command, verify it started:
 tmux has-session -t {SESSION_NAME} 2>/dev/null && echo "running" || echo "failed"
 ```
 
-If it failed, check `tasks/orchestrator.log` for errors and report them.
+If it failed, check `tasks/{PROJECT_SLUG}/orchestrator.log` for errors and report them.
 
 ### Confirmation
 
@@ -164,7 +192,7 @@ To view it from any terminal:
   tmux attach -t {SESSION_NAME}
 
 Other useful commands:
-  tail -f tasks/orchestrator.log                    # Follow the log without attaching
+  tail -f tasks/{PROJECT_SLUG}/orchestrator.log     # Follow the log without attaching
   tmux send-keys -t {SESSION_NAME} C-c              # Graceful shutdown (saves state)
   tmux kill-session -t {SESSION_NAME}                # Force kill
 
@@ -181,4 +209,4 @@ To resume after stopping:
 - If `tmux` is not installed: suggest `sudo apt install tmux` or fall back to running directly via Bash with `run_in_background: true`
 - If `python3` is not available: tell user Python 3 is required
 - If orchestrator.py is not found at any location: tell user to check their fat-controller installation
-- If tmux session fails to start: read `tasks/orchestrator.log` and report the error
+- If tmux session fails to start: read `tasks/{PROJECT_SLUG}/orchestrator.log` and report the error
