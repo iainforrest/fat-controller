@@ -1,8 +1,8 @@
 {
   "meta": {
     "projectName": "fat-controller",
-    "lastUpdated": "2026-02-14",
-    "totalFiles": 46,
+    "lastUpdated": "2026-02-21",
+    "totalFiles": 52,
     "description": "Smart file index with cross-references and quick navigation",
     "lineNumberPolicy": "Use globs or directories instead of file:line references."
   },
@@ -25,7 +25,8 @@
         ".claude/commands/values-discovery.md",
         ".claude/commands/domain-values.md",
         ".claude/commands/outcomes.md",
-        ".claude/commands/orchestrate.md"
+        ".claude/commands/orchestrate.md",
+        ".claude/commands/lead.md"
       ]
     },
     "agents": {
@@ -36,13 +37,16 @@
         ".claude/agents/code-review-agent.md",
         ".claude/agents/cto.md",
         ".claude/agents/pm.md",
-        ".claude/agents/pl.md"
+        ".claude/agents/pl.md",
+        ".claude/agents/project-lead.md",
+        ".claude/agents/discovery.md"
       ],
       "support": [
         ".claude/agents/cto-technical-advisor.md",
         ".claude/agents/security-auditor.md",
         ".claude/agents/ui-ux-expert.md",
-        ".claude/agents/debate-agent.md"
+        ".claude/agents/debate-agent.md",
+        ".claude/agents/prompt-architect.md"
       ]
     },
     "memorySystem": {
@@ -101,10 +105,11 @@
     },
     "orchestration": {
       "orchestrator": ["orchestrator.py"],
-      "agents": [".claude/agents/pm.md", ".claude/agents/pl.md"],
-      "stateFiles": ["tasks/ROADMAP.md", "tasks/OUTCOMES.md"],
+      "modelStylesheet": ["model-stylesheet.yaml"],
+      "agents": [".claude/agents/pm.md", ".claude/agents/pl.md", ".claude/agents/discovery.md", ".claude/agents/project-lead.md"],
+      "stateFiles": ["tasks/ROADMAP.md", "tasks/OUTCOMES.md", "tasks/PROJECT_STATE.md", "tasks/DECISIONS.md"],
       "templates": ["templates/ROADMAP.md"],
-      "commands": [".claude/commands/outcomes.md", ".claude/commands/orchestrate.md"]
+      "commands": [".claude/commands/outcomes.md", ".claude/commands/orchestrate.md", ".claude/commands/lead.md"]
     }
   },
   "byLayer": {
@@ -144,7 +149,7 @@
     ".claude/commands/execute.md": {
       "uses": [".ai/PATTERNS.md", ".ai/FILES.json", ".ai/QUICK.md", ".claude/agents/cto.md"],
       "inputs": ["/tasks/tasks-[name].md"],
-      "invokes": [".claude/agents/execution-agent.md", ".claude/agents/cto-technical-advisor.md"],
+      "invokes": [".claude/agents/task-protocol.md", ".claude/agents/cto-technical-advisor.md"],
       "captures": [".ai/solutions/*.yaml", ".ai/decisions/*.md", ".ai/DEPRECATIONS.md"]
     },
     ".claude/agents/cto.md": {
@@ -228,6 +233,36 @@
       "prerequisites": ["git repository", "tasks/OUTCOMES.md"],
       "tmuxSession": "orchestrator",
       "outputs": ["tasks/orchestrator.log"]
+    },
+    ".claude/commands/lead.md": {
+      "loads": ["~/.claude/agents/project-lead.md"],
+      "uses": ["tasks/OUTCOMES.md", "tasks/PROJECT_STATE.md", "tasks/DECISIONS.md", ".ai/QUICK.md"],
+      "invokes": [".claude/commands/prd.md", ".claude/commands/TaskGen.md", ".claude/commands/execute.md"],
+      "outputs": ["tasks/PROJECT_STATE.md", "tasks/DECISIONS.md"],
+      "prerequisites": ["tasks/OUTCOMES.md", "~/.claude/agents/project-lead.md"]
+    },
+    ".claude/agents/project-lead.md": {
+      "uses": ["~/.claude/VALUES.md", "tasks/OUTCOMES.md", "tasks/PROJECT_STATE.md", "tasks/DECISIONS.md"],
+      "invokes": [".claude/commands/prd.md", ".claude/commands/TaskGen.md", ".claude/commands/execute.md", ".claude/agents/cto.md"],
+      "outputs": ["tasks/PROJECT_STATE.md", "tasks/DECISIONS.md", "sprint deliverables"],
+      "invokedBy": [".claude/commands/lead.md"]
+    },
+    ".claude/agents/discovery.md": {
+      "uses": ["~/.claude/VALUES.md"],
+      "outputs": ["tasks/{node-id}/CONTEXT.md", "YAML signal (done|blocked|error)"],
+      "invokedBy": ["orchestrator.py (DiscoveryHandler)"],
+      "modes": ["simple (quick approach assessment)", "complex (investigation + debate)"]
+    },
+    ".claude/agents/prompt-architect.md": {
+      "uses": ["~/.claude/VALUES.md"],
+      "outputs": ["Refined prompt artifacts"],
+      "invokedBy": ["orchestrator.py", "manual invocation"]
+    },
+    "model-stylesheet.yaml": {
+      "defines": ["Model classes: planning, implementation, implementation-complex, review, gate, content-draft, discovery, discovery-simple, research, default"],
+      "specifies": ["provider, model, reasoning_effort, tool_profile, timeout per class"],
+      "fallbackChains": "Each class has fallback array tried in order on provider failure",
+      "readBy": ["orchestrator.py"]
     }
   },
   "keyInterfaces": {

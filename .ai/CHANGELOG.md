@@ -9,42 +9,50 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Graph Engine Core: DAG-based execution engine replacing linear PM-PL orchestration in orchestrator.py
+- GraphNode, GraphEdge, Graph, NodeOutcome, ModelConfig, CheckpointState, NodeCheckpoint data models
+- NodeType enum: TASK, DISCOVERY, GATE, FAN_OUT, FAN_IN
+- ContextFidelityMode enum: MINIMAL, PARTIAL, FULL - controls upstream context passed to nodes
+- DomainType enum: SOFTWARE, CONTENT, MIXED - drives handler selection
+- GraphEngine class: DAG validation, ready-node selection, edge condition evaluation, cycle detection
+- Per-node CheckpointManager: atomic write-then-rename persists state after every node transition
+- Graph resume: restart interrupted runs from last checkpoint, not from scratch
+- SoftwareHandler: code-focused node execution with worktree creation, merge, and git operations
+- ContentHandler: content/writing node execution with source material aggregation
+- DiscoveryHandler: adaptive complexity routing (simple vs complex discovery mode)
+- GoalGate: deterministic acceptance criteria evaluator for gate nodes
+- Goal gate retry routing: gate failures re-run retry_target node up to max_retries then escalate
+- model-stylesheet.yaml: external model class definitions (planning, implementation, implementation-complex, review, gate, content-draft, discovery, discovery-simple, research, default) with provider, model, reasoning_effort, tool_profile, timeout, and fallback chains
+- Provider-native invocation: claude CLI for Anthropic nodes, codex CLI for OpenAI nodes
+- /lead command: boot Project Lead personality, load state files, generate briefing, begin orchestration
+- project-lead.md agent: Project Lead identity, values, decision authority, sprint pipeline behavior
+- discovery.md agent: Discovery node agent producing CONTEXT.md with approach, rationale, constraints
+- prompt-architect.md agent: Prompt engineering specialist for prompt refinement work
+- /outcomes v2: Full rewrite with 6-phase state machine (discovery, red-team, synthesis, context, refinement, finalize), XML phase tracking, resumability, and parallel red-team dispatch
+- Auto-archiving: orchestrator archives completed project artifacts to tasks/archive/<name>-<date>/ on successful exit
+- Graph Engine Orchestration pattern in PATTERNS.md
+- Model Stylesheet pattern in PATTERNS.md
+- Discovery Node pattern in PATTERNS.md
+- Goal Gate Convergence pattern in PATTERNS.md
+- Project Lead Orchestration pattern in PATTERNS.md
 - /orchestrate command: Launch orchestrator in tmux background session with pre-flight checks
-- /outcomes command: Interactive project setup for outcome discovery and state file initialization
-- orchestrator.py: Python 3 stdlib orchestrator for autonomous PM-PL execution cycles (~1500 lines)
-- --skip-values-check flag for orchestrator.py (used by /orchestrate command)
-- PM agent (.claude/agents/pm.md): Project Manager for sprint planning and PRD generation (273 lines)
-- PL agent (.claude/agents/pl.md): Project Lead for sprint execution via TaskGen and Execute (276 lines)
-- templates/ROADMAP.md: Sprint state tracking template (198 lines)
-- Structured Output Protocol: YAML signal blocks between ---ORCHESTRATOR_SIGNAL--- markers for orchestrator-agent communication
+- PM agent (.claude/agents/pm.md): Project Manager for sprint planning and PRD generation
+- PL agent (.claude/agents/pl.md): Project Lead for sprint execution via TaskGen and Execute
+- templates/ROADMAP.md: Sprint state tracking template
+- Structured Output Protocol: YAML signal blocks between ---ORCHESTRATOR_SIGNAL--- markers
 - Values-Driven Agent Boot: PM, PL, and CTO agents load ~/.claude/VALUES.md for personalized decision-making
-- Graduated Warning Flow: orchestrator checks for VALUES.md, warns if missing, allows user to proceed in generic mode
-- Generic Mode: agents use conservative judgments (~60% confidence threshold) when VALUES.md absent
-- /values-discovery and /domain-values commands copied to fat-controller
-- Git branch management: orchestrator creates sprint/* branches per sprint
-- Parallel PL execution: orchestrator spawns multiple PL agents for independent sprints
-- Two-phase merge: orchestrator runs git merge --no-commit to detect conflicts before committing
-- Graceful shutdown: SIGINT (Ctrl+C) handler preserves ROADMAP.md state
-- Stuck detection: orchestrator halts if same sprint name appears 3 times in sequence
-- Session logging: .claude-orchestrator/orchestrator.log with structured timestamps
-- Autonomous Orchestration pattern in PATTERNS.md
-- Values-Driven Agent Boot pattern in PATTERNS.md
-- Structured Output Protocol pattern in PATTERNS.md
-- Python bytecode and orchestrator log exclusions in .gitignore
-- package.json: includes orchestrator.py and templates/ROADMAP.md in npm distribution files array
+- Graduated Warning Flow: orchestrator checks for VALUES.md, warns if missing, allows user to proceed
 
 ### Changed
-- /outcomes command offers to run /orchestrate after completion (optional)
-- CTO agent (.claude/agents/cto.md) refactored for dynamic VALUES.md loading with graceful degradation
-- README.md, INSTALL-NEW.md, INSTALL-EXISTING.md updated with orchestrator documentation and usage examples
-- Memory system updated to track orchestrator components, agents, patterns, and data flows
-- PM agent graduated warning flow clarified for VALUES.md handling
+- orchestrator.py massively expanded (~4600 lines): graph engine replaces simple PM-PL loop
+- /outcomes command fully rewritten as v2 with 6-phase state machine
+- OrchestratorState extended with current_graph, checkpoint_manager, run_id fields
+- _log_agent_io extended with command parameter for provider-native command logging
 
 ### Fixed
-- Code review findings: Python bytecode patterns in .gitignore
-- Code review findings: YAML parser logging improvements
-- Code review findings: Sequential execution guard in orchestrator.py
-- Code review findings: SIGINT handler placement for graceful shutdown
+- Code review findings: security, logic, and deduplication issues in orchestrator.py
+- Improved SIGINT handler with graceful shutdown and state preservation
+- _compare_scalar_values extracted for deterministic gate criterion evaluation
 
 ---
 

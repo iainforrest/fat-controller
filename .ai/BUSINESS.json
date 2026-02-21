@@ -1,8 +1,8 @@
 {
   "meta": {
     "projectName": "fat-controller",
-    "version": "3.3.1",
-    "lastUpdated": "2026-02-14",
+    "version": "4.0.0",
+    "lastUpdated": "2026-02-21",
     "description": "Business logic, feature specifications, and product requirements"
   },
   "features": {
@@ -184,6 +184,62 @@
         "Create OUTCOMES.md, PROJECT_STATE.md, DECISIONS.md",
         "Optional Project Lead section in CLAUDE.md",
         "Offer to run /orchestrate after completion"
+      ]
+    },
+    "graphEngineOrchestration": {
+      "status": "complete",
+      "version": "v4.0.0",
+      "description": "DAG-based graph execution engine replacing linear PM-PL orchestration in orchestrator.py. Supports typed nodes, domain handlers, per-node checkpointing, and goal gate convergence.",
+      "keyComponents": [
+        "GraphEngine - DAG validation and traversal (ready node selection, edge evaluation)",
+        "NodeType enum: TASK, DISCOVERY, GATE, FAN_OUT, FAN_IN",
+        "ContextFidelityMode enum: MINIMAL, PARTIAL, FULL",
+        "DomainType enum: SOFTWARE, CONTENT, MIXED",
+        "SoftwareHandler - code-focused execution (worktree, merge)",
+        "ContentHandler - content/writing execution",
+        "DiscoveryHandler - adaptive approach selection (simple/complex)",
+        "GoalGate - deterministic acceptance criteria evaluation with retry routing",
+        "CheckpointManager - atomic per-node checkpoint with write-then-rename",
+        "model-stylesheet.yaml - external model class definitions with fallback chains"
+      ]
+    },
+    "outcomesV2": {
+      "status": "complete",
+      "version": "v4.0.0",
+      "description": "Full rewrite of /outcomes command with 6-phase state machine, XML phase tracking, resumability, and parallel red-team dispatch",
+      "keyComponents": [
+        "6 phases: discovery, red-team, synthesis, context, refinement, finalize",
+        "XML state tracking for per-phase resumability",
+        "Parallel red-team dispatch: multiple agents challenge outcomes concurrently",
+        "Interactive refinement round until stopping criteria met",
+        "Auto-archiving of completed project artifacts on successful orchestrator exit",
+        "Creates OUTCOMES.md, PROJECT_STATE.md, DECISIONS.md on finalize"
+      ]
+    },
+    "projectLeadAgent": {
+      "status": "complete",
+      "version": "v4.0.0",
+      "description": "Project Lead agent and /lead command for outcome-to-delivery orchestration using agent teams to protect context window",
+      "keyComponents": [
+        "/lead command - boots Project Lead personality and state, generates briefing",
+        "project-lead.md - identity, values, decision authority, sprint pipeline behavior",
+        "Sprint boundary identification flow (before PRD generation)",
+        "Decision authority: decides sprint scope, invocation order, team composition",
+        "Escalation threshold: <70% confidence AND significant downside",
+        "OUTCOMES.md is read-only (never modified by Project Lead)",
+        "Uses TeamCreate for parallel workstreams when work supports it"
+      ]
+    },
+    "discoveryAgent": {
+      "status": "complete",
+      "version": "v4.0.0",
+      "description": "Discovery agent for approach determination before implementation. Produces CONTEXT.md for downstream nodes.",
+      "keyComponents": [
+        "Simple mode: quick approach assessment (faster, less research)",
+        "Complex mode: deep investigation using /investigate and optional /debate",
+        "Outputs tasks/{node-id}/CONTEXT.md with approach, rationale, constraints",
+        "ORCHESTRATOR_SIGNAL: done|blocked|error with context_path and complexity_used",
+        "Invoked by orchestrator.py DiscoveryHandler"
       ]
     },
     "_example": {

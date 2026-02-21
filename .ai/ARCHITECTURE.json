@@ -1,8 +1,8 @@
 {
   "meta": {
     "projectName": "fat-controller",
-    "version": "3.3.1",
-    "lastUpdated": "2026-02-14",
+    "version": "4.0.0",
+    "lastUpdated": "2026-02-21",
     "description": "Architecture patterns, data flows, and component relationships"
   },
   "corePatterns": {
@@ -175,6 +175,76 @@
         "Clear orchestrator control flow",
         "Structured error handling and blocking conditions",
         "Supports parallel task execution"
+      ]
+    },
+    "graphEngineOrchestration": {
+      "description": "DAG-based graph execution engine replacing linear PM-PL cycles. Nodes are typed (task, discovery, gate, fan_out, fan_in), executed via domain handlers, with per-node atomic checkpointing and resume.",
+      "keyFiles": ["orchestrator.py", "model-stylesheet.yaml", ".claude/agents/discovery.md"],
+      "constraints": [
+        "Graph must be a valid DAG (no cycles) - validated at startup",
+        "Node types: TASK, DISCOVERY, GATE, FAN_OUT, FAN_IN",
+        "Context fidelity modes: MINIMAL (default), PARTIAL, FULL",
+        "Domain types: SOFTWARE (default), CONTENT, MIXED",
+        "Checkpoint written atomically via write-then-rename on every node state change",
+        "Gate nodes use GoalGate evaluator with configurable acceptance criteria",
+        "Goal gate failures trigger retry routing (up to max_retries) then escalation",
+        "Model selection driven by model-stylesheet.yaml (not hardcoded in orchestrator)"
+      ],
+      "benefits": [
+        "Resumable execution: restart from last checkpoint, not from scratch",
+        "Domain-appropriate handlers (SoftwareHandler for code, ContentHandler for content, DiscoveryHandler for approach decisions)",
+        "Provider-native invocation: claude CLI for Anthropic, codex CLI for OpenAI",
+        "Model fallback chains defined in stylesheet per node class",
+        "Adaptive discovery: simple vs complex mode based on complexity detection",
+        "Goal gate convergence ensures quality before downstream nodes execute"
+      ]
+    },
+    "modelStylesheetSystem": {
+      "description": "External YAML file defines model provider, reasoning effort, and fallback chains per node class. Decouples model selection from orchestrator code.",
+      "keyFiles": ["model-stylesheet.yaml"],
+      "constraints": [
+        "Node classes: planning, implementation, implementation-complex, review, gate, content-draft, discovery, discovery-simple, research, default",
+        "Each class specifies: provider (anthropic|openai), model, reasoning_effort, tool_profile, timeout",
+        "Fallback array: tried in order if primary provider fails",
+        "tool_profile drives which CLI is used: claude for anthropic, codex for openai"
+      ],
+      "benefits": [
+        "Model assignments changeable without touching orchestrator code",
+        "Fallback chains provide resilience when providers are unavailable",
+        "Separate planning vs implementation vs review model tiers",
+        "Single file to tune performance/cost trade-offs"
+      ]
+    },
+    "outcomesV2Pipeline": {
+      "description": "6-phase state-machine for outcome discovery with XML phase tracking, resumability, parallel red-team dispatch, and interactive refinement",
+      "keyFiles": [".claude/commands/outcomes.md"],
+      "constraints": [
+        "Phases: discovery, red-team, synthesis, context, refinement, finalize",
+        "XML tracking enables resume from last completed phase",
+        "Parallel red-team dispatch: multiple agents challenge outcomes concurrently",
+        "outcomes.md is read-only to Project Lead (OUTCOMES.md is the output)"
+      ],
+      "benefits": [
+        "Resumable if interrupted mid-phase",
+        "Red-team phase surfaces blind spots and contradictions early",
+        "Synthesis phase produces refined, measurable outcomes",
+        "Finalize phase creates all state files (OUTCOMES.md, PROJECT_STATE.md, DECISIONS.md)"
+      ]
+    },
+    "projectLeadOrchestration": {
+      "description": "Project Lead agent drives sprints from outcomes to delivery using agent teams for parallel execution, protecting its own context window by delegating to sub-agents",
+      "keyFiles": [".claude/commands/lead.md", ".claude/agents/project-lead.md"],
+      "constraints": [
+        "OUTCOMES.md is read-only for Project Lead (never modified)",
+        "Must update PROJECT_STATE.md and DECISIONS.md after every state transition",
+        "Escalation threshold: <70% confidence AND significant downside",
+        "Uses TeamCreate for parallel workstreams when work supports it"
+      ],
+      "benefits": [
+        "Context window protected by delegating heavy work to sub-agents",
+        "Outcomes-driven: every sprint must map to an explicit outcome",
+        "Decision authority framework prevents unnecessary interruptions to user",
+        "State files (PROJECT_STATE.md, DECISIONS.md) provide audit trail"
       ]
     },
     "_example": {
@@ -352,6 +422,50 @@
         "CLAUDE.md"
       ],
       "dataModel": "Interactive Q&A → OUTCOMES.md + state files → optional orchestrate launch"
+    },
+    "graphEngineExecutionFlow": {
+      "name": "Graph engine node execution with checkpointing and domain handlers",
+      "steps": [
+        "Orchestrator loads model-stylesheet.yaml and graph definition",
+        "GraphEngine validates DAG (no cycles, all node refs exist)",
+        "CheckpointManager loads or creates checkpoint.json for this run",
+        "GraphEngine.get_ready_nodes() returns nodes with all deps completed",
+        "For each ready node: select domain handler (Software/Content/Discovery)",
+        "Handler selects model config from stylesheet by node class",
+        "Provider-native invocation: claude CLI (Anthropic) or codex CLI (OpenAI)",
+        "Node output parsed for ORCHESTRATOR_SIGNAL; outcome recorded to checkpoint",
+        "GATE nodes: GoalGate evaluates acceptance criteria on upstream outcomes",
+        "Gate failure: retry routing up to max_retries, then escalate",
+        "Loop until all nodes completed, blocked, or failed"
+      ],
+      "keyFiles": [
+        "orchestrator.py",
+        "model-stylesheet.yaml",
+        ".claude/agents/discovery.md"
+      ],
+      "dataModel": "Graph(nodes, edges, domain) → CheckpointState → NodeOutcome → final artifacts"
+    },
+    "leadCommandFlow": {
+      "name": "Project Lead boot and orchestration flow",
+      "steps": [
+        "User invokes /lead command",
+        "Load project-lead.md personality from ~/.claude/agents/",
+        "Load OUTCOMES.md (required - halt if missing)",
+        "Load or create PROJECT_STATE.md and DECISIONS.md",
+        "Load .ai/QUICK.md for memory context (optional)",
+        "Generate status briefing (PROJECT, OUTCOMES, CURRENT SPRINT, etc.)",
+        "Determine NEXT ACTION from state decision tree",
+        "Begin executing next action (sprint boundary, PRD, tasks, execution)",
+        "Use TeamCreate for parallel workstreams to protect context window"
+      ],
+      "keyFiles": [
+        ".claude/commands/lead.md",
+        ".claude/agents/project-lead.md",
+        "tasks/OUTCOMES.md",
+        "tasks/PROJECT_STATE.md",
+        "tasks/DECISIONS.md"
+      ],
+      "dataModel": "OUTCOMES.md + PROJECT_STATE.md + DECISIONS.md → sprint pipeline → delivered code"
     },
     "_example": {
       "name": "User authentication flow",

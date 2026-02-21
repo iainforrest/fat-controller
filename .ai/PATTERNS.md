@@ -55,6 +55,11 @@ Find the right pattern for your task:
 | Values-driven agent boot | Values-Driven Agent Boot Pattern | (below) |
 | Structured agent signals | Structured Output Protocol | (below) |
 | Tmux background execution | Tmux Background Orchestration | (below) |
+| DAG-based graph execution | Graph Engine Orchestration Pattern | (below) |
+| Model class routing | Model Stylesheet Pattern | (below) |
+| Discovery before implementation | Discovery Node Pattern | (below) |
+| Quality gate with retry | Goal Gate Convergence Pattern | (below) |
+| Outcome-to-delivery | Project Lead Orchestration Pattern | (below) |
 
 *Table expands as you add patterns. Update when adding new domain files.*
 
@@ -880,6 +885,289 @@ summary: "Sprint completed: auth service implemented, 15 tests passing, merged t
 - **Multiple signals in one output**: Use first valid signal, warn about duplicates
 
 **Reference**: `orchestrator.py`, `.claude/agents/pm.md`, `.claude/agents/pl.md`
+
+---
+
+## Built-in Pattern: Graph Engine Orchestration
+
+DAG-based execution engine where nodes are typed, domain-appropriate, and checkpointed per step.
+
+### When to Use
+- Multi-step projects requiring typed execution nodes (task, discovery, gate, fan_out, fan_in)
+- Need resumability: resume from last checkpoint if interrupted
+- Want domain-appropriate handlers (software vs content vs discovery)
+- Quality gates needed before downstream work begins
+
+### Node Types
+```
+TASK       - Implementation work (SoftwareHandler or ContentHandler)
+DISCOVERY  - Approach determination before implementation (DiscoveryHandler)
+GATE       - Acceptance criteria evaluation (GoalGate, deterministic)
+FAN_OUT    - Spawn parallel branches
+FAN_IN     - Merge parallel branches
+```
+
+### Context Fidelity Modes
+```
+MINIMAL  - Only immediate upstream summary passed (default, token efficient)
+PARTIAL  - Upstream summaries + key artifacts
+FULL     - Complete upstream context passed
+```
+
+### Graph Definition Structure
+```yaml
+nodes:
+  discover-approach:
+    type: discovery
+    node_class: discovery
+    handler: discovery
+    inputs:
+      outcome_name: "Feature X"
+  implement:
+    type: task
+    node_class: implementation
+    handler: software
+    context_fidelity: partial
+  quality-gate:
+    type: gate
+    node_class: gate
+    handler: gate
+    criteria:
+      - "output.status == completed"
+      - "output.artifacts contains tests"
+    max_retries: 3
+    retry_target: implement
+edges:
+  - source: discover-approach
+    target: implement
+    condition: "status == completed"
+  - source: implement
+    target: quality-gate
+    condition: always
+```
+
+### Implementation Checklist
+- [ ] Define nodes with types and handler classes
+- [ ] Map edges with conditions (always|status==completed|status==failed)
+- [ ] Set context_fidelity per node (default: minimal)
+- [ ] Configure model-stylesheet.yaml node classes
+- [ ] Run orchestrator.py which auto-validates DAG and creates checkpoint
+- [ ] Monitor via checkpoint.json for state inspection
+
+**Reference**: `orchestrator.py`, `model-stylesheet.yaml`
+
+---
+
+## Built-in Pattern: Model Stylesheet
+
+External YAML file defines model selection per node class with fallback chains. Decouples model assignment from orchestrator logic.
+
+### When to Use
+- Node needs a specific model tier (planning, implementation, review, gate)
+- Want to tune cost/quality trade-offs without touching orchestrator code
+- Need fallback resilience when a provider is unavailable
+
+### Node Class Mapping
+```yaml
+# model-stylesheet.yaml
+classes:
+  planning:           # Claude Opus + xhigh reasoning (architecture decisions)
+  implementation:     # Codex medium (code tasks, fast and efficient)
+  implementation-complex:  # Codex xhigh (complex multi-file refactors)
+  review:             # Claude Opus + xhigh (code review, quality assessment)
+  gate:               # Claude Sonnet + medium (gate evaluation, deterministic)
+  content-draft:      # Claude Opus + medium (writing tasks)
+  discovery:          # Claude Opus + xhigh (complex approach decisions)
+  discovery-simple:   # Claude Sonnet + medium (quick approach assessment)
+  research:           # Claude Opus + xhigh (investigation tasks)
+  default:            # Codex medium (unspecified node classes)
+```
+
+### Fallback Chain Pattern
+```yaml
+implementation:
+  provider: openai
+  model: gpt-5.3-codex
+  reasoning_effort: medium
+  tool_profile: codex
+  timeout: 7200
+  fallback:
+    - provider: anthropic
+      model: claude-sonnet-4-6
+      reasoning_effort: medium
+      tool_profile: claude
+      timeout: 7200
+```
+
+### Implementation Checklist
+- [ ] Assign node_class in graph definition
+- [ ] Confirm class exists in model-stylesheet.yaml
+- [ ] Set tool_profile correctly (claude for Anthropic, codex for OpenAI)
+- [ ] Add fallback chain for resilience
+
+**Reference**: `model-stylesheet.yaml`, `orchestrator.py` (ModelConfig, NodeHandler)
+
+---
+
+## Built-in Pattern: Discovery Node
+
+Run a discovery phase to determine approach before implementation. Prevents wasted implementation effort on the wrong approach.
+
+### When to Use
+- Before any non-trivial implementation node
+- When approach is ambiguous or has multiple valid options
+- Complex domain problems needing research before coding
+
+### Simple vs Complex Mode
+```
+Simple mode (complexity < threshold):
+  - Quick approach assessment
+  - Outputs: Approach + Rationale + Constraints
+  - Model: discovery-simple class (Sonnet)
+
+Complex mode (complexity >= threshold):
+  - Deep investigation (/investigate tool)
+  - Optional /debate for competing approaches
+  - Outputs: Approach + Rationale + Constraints + Findings + Alternatives
+  - Model: discovery class (Opus)
+```
+
+### Output: CONTEXT.md
+```markdown
+# Discovery: {Outcome Name}
+
+## Approach
+{Chosen method}
+
+## Rationale
+{Why selected}
+
+## Constraints
+{Known limitations}
+
+## Investigation Findings
+{Complex only}
+
+## Alternatives Considered
+{Complex only}
+```
+
+### Signal Format
+```yaml
+---ORCHESTRATOR_SIGNAL---
+signal: done
+summary: "Discovery complete: use REST API with JWT auth"
+context_path: "tasks/{node-id}/CONTEXT.md"
+complexity_used: "simple|complex"
+---ORCHESTRATOR_SIGNAL---
+```
+
+**Reference**: `.claude/agents/discovery.md`, `orchestrator.py` (DiscoveryHandler)
+
+---
+
+## Built-in Pattern: Goal Gate Convergence
+
+Deterministic acceptance criteria evaluation with retry routing before downstream nodes execute.
+
+### When to Use
+- Quality checkpoint before downstream work proceeds
+- Ensure implementation meets defined criteria
+- Prevent propagation of defects to dependent work
+
+### Gate Criteria Syntax
+```yaml
+criteria:
+  - "output.status == completed"           # Node status check
+  - "output.artifacts contains tests"      # Artifact presence
+  - "output.merge_success == true"         # Specific field value
+  - "file:tasks/output.md exists"          # File existence check
+```
+
+### Retry Routing
+```
+Gate fails → retry_target node re-executed → gate re-evaluated
+Max retries exceeded → escalate to user
+```
+
+### Gate Flow
+```
+Upstream node(s) complete
+    ↓
+GoalGate.evaluate(upstream_outcomes)
+    ↓
+All criteria pass? → COMPLETED (downstream proceeds)
+Any fail? → FAILED
+    ↓
+Retry count < max_retries?
+    Yes → re-run retry_target → re-evaluate gate
+    No → ESCALATE to user with criteria failure details
+```
+
+### Implementation Checklist
+- [ ] Define gate node in graph with criteria list
+- [ ] Set retry_target (node to re-run on failure)
+- [ ] Set max_retries (default: 3)
+- [ ] Criteria should be deterministic (no LLM needed for evaluation)
+- [ ] Use node_class: gate (routes to Sonnet medium, efficient)
+
+**Reference**: `orchestrator.py` (GoalGate, GraphEngine)
+
+---
+
+## Built-in Pattern: Project Lead Orchestration
+
+Project Lead drives sprints from OUTCOMES.md through PRD → TaskGen → Execute pipeline using agent teams for parallel work.
+
+### When to Use
+- Multi-sprint outcome-driven project work
+- Want to delegate heavy pipeline work to protect context window
+- Need structured state tracking (PROJECT_STATE.md, DECISIONS.md)
+
+### Sprint Pipeline
+```
+/lead boot (load personality, state, briefing)
+    ↓
+Identify next sprint from OUTCOMES.md
+    ↓
+Propose sprint scope to Iain (confirm before PRD)
+    ↓
+/prd → PRD document
+    ↓
+/TaskGen → task XML
+    ↓
+/execute → code delivery
+    ↓
+Update PROJECT_STATE.md + DECISIONS.md
+    ↓
+Identify next sprint → repeat
+```
+
+### Decision Authority
+```
+Project Lead DECIDES:
+  - Sprint sequencing and scope
+  - Whether to use agent teams (TeamCreate) for parallel work
+  - PRD and task review outcomes (proceed/adjust)
+  - State file updates
+
+Project Lead ESCALATES to Iain:
+  - OUTCOMES.md modification requests (read-only)
+  - Conflicts between outcomes
+  - Blockers persisting after one recovery attempt
+  - <70% confidence AND significant downside risk
+```
+
+### Context Window Protection
+```python
+# Protect context by delegating to sub-agents
+# Instead of running PRD→Tasks→Execute inline, spawn an agent team
+team = TeamCreate("sprint-N")
+assign(teammate, "/prd context")
+monitor_until_complete()
+```
+
+**Reference**: `.claude/commands/lead.md`, `.claude/agents/project-lead.md`
 
 ---
 
