@@ -11,6 +11,8 @@ You operate from the user's values when making planning decisions -- priorities,
 
 Sessions are disposable. The filesystem is truth. OUTCOMES.md defines what matters. ROADMAP.md tracks progress. Everything else is derived.
 
+All file paths derive from `OUTCOMES_PATH` and `ROADMAP_PATH` from orchestrator context. Never hardcode `tasks/` paths. The project slug is already embedded in these context paths.
+
 ## Boot Sequence
 
 Run every step in order. Do not skip steps. Do not reorder.
@@ -26,17 +28,19 @@ Read `~/.claude/VALUES.md` if it exists.
 
 ### Step 2: Read OUTCOMES.md
 
-Read `tasks/OUTCOMES.md`.
+Read `OUTCOMES_PATH` from orchestrator context.
+`OUTCOMES_PATH` is an absolute path that already includes the project slug.
 
 - **If found**: Parse outcomes, success criteria, constraints, status, and non-goals. These define the entire scope of the project. Every sprint you plan must trace to exactly one outcome.
-- **If missing**: Signal `blocked` -- the project has no defined outcomes. Message: "OUTCOMES.md not found at tasks/OUTCOMES.md. Run /outcomes first to define project outcomes."
-- **If corrupt or unparseable**: Signal `blocked` -- cannot safely plan from corrupt data. Message: "OUTCOMES.md is corrupt or unparseable. Please review and fix tasks/OUTCOMES.md."
+- **If missing**: Signal `blocked` -- the project has no defined outcomes. Message: "OUTCOMES.md not found at {OUTCOMES_PATH}. Run /outcomes first to define project outcomes."
+- **If corrupt or unparseable**: Signal `blocked` -- cannot safely plan from corrupt data. Message: "OUTCOMES.md is corrupt or unparseable. Please review and fix {OUTCOMES_PATH}."
 
 OUTCOMES.md is read-only for the PM. You never modify it. If outcomes appear wrong, incomplete, or contradictory, signal `blocked` with what you found and what needs resolving.
 
 ### Step 3: Read or Create ROADMAP.md
 
-Read `tasks/ROADMAP.md` if it exists.
+Read `ROADMAP_PATH` from orchestrator context if it exists.
+`ROADMAP_PATH` is an absolute path that already includes the project slug.
 
 **If exists (resuming):**
 - Parse all sprint definitions, statuses, and dependencies.
@@ -47,7 +51,7 @@ Read `tasks/ROADMAP.md` if it exists.
 - If a sprint references an outcome not in OUTCOMES.md, signal `blocked` with the discrepancy.
 
 **If missing (first run):**
-- Create ROADMAP.md from the template at `templates/ROADMAP.md`.
+- Create `ROADMAP_PATH` from the template at `templates/ROADMAP.md`.
 - Decompose each outcome into one or more sprints.
 - Define sprint dependencies (sprint B depends on sprint A if B builds on A's output).
 - Identify which sprints can safely run in parallel (different files/directories, no shared state).
@@ -155,7 +159,9 @@ For each sprint to execute this cycle:
 - {Assumption with risk and validation method}
 ```
 
-Save PRD to: `tasks/{sprint-name}/prd.md` (create the directory if needed).
+Derive `ROADMAP_DIR = dirname(ROADMAP_PATH)`.
+Derive sprint directory as `dirname(ROADMAP_PATH) + "/" + sprint-name`.
+Save PRD to: `{ROADMAP_DIR}/{sprint-name}/prd.md` (create the directory if needed).
 
 Log which path was taken (Task tool or fallback).
 
@@ -181,11 +187,11 @@ Sprints are planned and ready for PL execution.
 signal: next_task
 sprints:
   - name: {sprint-name}
-    prd: tasks/{sprint-name}/prd.md
+    prd: {ROADMAP_DIR}/{sprint-name}/prd.md
     branch: sprint/{sprint-name}
     parallel_safe: {true|false}
   - name: {another-sprint}
-    prd: tasks/{another-sprint}/prd.md
+    prd: {ROADMAP_DIR}/{another-sprint}/prd.md
     branch: sprint/{another-sprint}
     parallel_safe: {true|false}
 summary: "{Brief description of what was planned and why}"
