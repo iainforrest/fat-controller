@@ -29,10 +29,12 @@ import subprocess
 import sys
 import textwrap
 import time
+from collections import deque
+from enum import Enum
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -227,6 +229,130 @@ class OrchestratorState:
 
 
 # ---------------------------------------------------------------------------
+# Graph engine data models
+# ---------------------------------------------------------------------------
+
+class NodeType(Enum):
+    """Node role in a graph execution plan."""
+    TASK = "task"
+    DISCOVERY = "discovery"
+    GATE = "gate"
+    FAN_OUT = "fan_out"
+    FAN_IN = "fan_in"
+
+
+class NodeStatus(Enum):
+    """Execution state for a graph node."""
+    PENDING = "pending"
+    READY = "ready"
+    IN_PROGRESS = "in_progress"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    RETRYING = "retrying"
+
+
+class ContextFidelityMode(Enum):
+    """How much upstream context to pass to a node."""
+    MINIMAL = "minimal"
+    PARTIAL = "partial"
+    FULL = "full"
+
+
+class DomainType(Enum):
+    """Execution domain for the graph."""
+    SOFTWARE = "software"
+    CONTENT = "content"
+    MIXED = "mixed"
+
+
+@dataclass
+class GraphNode:
+    """Single graph node definition."""
+    id: str
+    name: str
+    type: NodeType
+    node_class: str
+    handler: str
+    inputs: Dict[str, Any] = field(default_factory=dict)
+    context_fidelity: ContextFidelityMode = ContextFidelityMode.MINIMAL
+    complexity_hint: Optional[str] = None
+    discovery_tools: List[str] = field(default_factory=list)
+    criteria: List[str] = field(default_factory=list)
+    retry_target: Optional[str] = None
+    max_retries: int = 3
+    prd_path: Optional[str] = None
+    branch: Optional[str] = None
+    output_path: Optional[str] = None
+    source_materials: List[str] = field(default_factory=list)
+
+
+@dataclass
+class GraphEdge:
+    """Directed edge between graph nodes."""
+    source: str
+    target: str
+    condition: str = "always"
+
+
+@dataclass
+class Graph:
+    """Graph definition for orchestrated execution."""
+    nodes: Dict[str, GraphNode]
+    edges: List[GraphEdge]
+    domain: DomainType = DomainType.SOFTWARE
+
+
+@dataclass
+class NodeOutcome:
+    """Execution output for a completed node."""
+    status: str
+    output_summary: str
+    artifacts: List[str] = field(default_factory=list)
+    duration: float = 0.0
+    model_used: str = ""
+    error_details: Optional[str] = None
+    commit_shas: List[str] = field(default_factory=list)
+    merge_success: Optional[bool] = None
+    merge_details: Optional[str] = None
+    criteria_results: Dict[str, bool] = field(default_factory=dict)
+
+
+@dataclass
+class ModelConfig:
+    """Model provider configuration for a graph node class."""
+    provider: str
+    model: str
+    reasoning_effort: str = "medium"
+    tool_profile: str = "claude"
+    timeout: int = 7200
+    fallback: List["ModelConfig"] = field(default_factory=list)
+
+
+@dataclass
+class CheckpointState:
+    """Persisted state for an in-flight graph run."""
+    run_id: str
+    graph_hash: str
+    nodes: Dict[str, "NodeCheckpoint"]
+    created_at: str
+    updated_at: str
+    gate_retries: Dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
+class NodeCheckpoint:
+    """Persisted state for a single node."""
+    status: str
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    output_summary: Optional[str] = None
+    model_used: Optional[str] = None
+    artifacts: List[str] = field(default_factory=list)
+    error_details: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
 # Graceful shutdown
 # ---------------------------------------------------------------------------
 
@@ -258,6 +384,266 @@ def check_shutdown(state: Optional[OrchestratorState] = None) -> None:
             )
         logger.info("Graceful shutdown: exiting between operations")
         sys.exit(0)
+
+
+# ---------------------------------------------------------------------------
+# Graph engine
+# ---------------------------------------------------------------------------
+
+class GraphEngine:
+    """Core graph utilities for validation and traversal readiness."""
+
+    def __init__(self, graph: Graph):
+        self.graph = graph
+        self.forward_edges: Dict[str, List[GraphEdge]] = {
+            node_id: [] for node_id in graph.nodes
+        }
+        self.reverse_edges: Dict[str, List[GraphEdge]] = {
+            node_id: [] for node_id in graph.nodes
+        }
+        self.in_degree: Dict[str, int] = {
+            node_id: 0 for node_id in graph.nodes
+        }
+
+        for edge in graph.edges:
+            self.forward_edges.setdefault(edge.source, []).append(edge)
+            self.reverse_edges.setdefault(edge.target, []).append(edge)
+            if edge.target in self.in_degree:
+                self.in_degree[edge.target] += 1
+
+        # Ensure all graph nodes are addressable even when no edges exist.
+        for node_id in graph.nodes:
+            self.forward_edges.setdefault(node_id, [])
+            self.reverse_edges.setdefault(node_id, [])
+
+    def validate(self) -> Tuple[bool, List[str]]:
+        """Validate node references and DAG acyclicity."""
+        errors: List[str] = []
+        seen_missing: Set[str] = set()
+
+        for edge in self.graph.edges:
+            if edge.source not in self.graph.nodes and edge.source not in seen_missing:
+                seen_missing.add(edge.source)
+                errors.append(f"Edge references unknown node: '{edge.source}'")
+            if edge.target not in self.graph.nodes and edge.target not in seen_missing:
+                seen_missing.add(edge.target)
+                errors.append(f"Edge references unknown node: '{edge.target}'")
+
+        # Kahn's algorithm for cycle detection (ignores edges to unknown nodes).
+        in_degree = {node_id: 0 for node_id in self.graph.nodes}
+        for edge in self.graph.edges:
+            if edge.source in self.graph.nodes and edge.target in self.graph.nodes:
+                in_degree[edge.target] += 1
+
+        queue = deque(
+            node_id for node_id, degree in in_degree.items() if degree == 0
+        )
+        visited_count = 0
+
+        while queue:
+            node_id = queue.popleft()
+            visited_count += 1
+
+            for edge in self.forward_edges.get(node_id, []):
+                target_id = edge.target
+                if target_id not in in_degree:
+                    continue
+                in_degree[target_id] -= 1
+                if in_degree[target_id] == 0:
+                    queue.append(target_id)
+
+        if visited_count != len(self.graph.nodes):
+            cyclic_nodes = {
+                node_id for node_id, degree in in_degree.items() if degree > 0
+            }
+            cycle = self._find_cycle(cyclic_nodes)
+            if cycle:
+                errors.append(f"Cycle detected: {' -> '.join(cycle)}")
+            else:
+                # Preserve expected cycle error shape even on fallback.
+                anchor = next(iter(cyclic_nodes), "unknown")
+                errors.append(f"Cycle detected: {anchor} -> {anchor}")
+
+        return (len(errors) == 0, errors)
+
+    def get_ready_nodes(self, status_map: Dict[str, str]) -> List[str]:
+        """Return nodes whose dependencies are complete and edges are active."""
+        ready: List[str] = []
+
+        for node_id in self.graph.nodes:
+            current_status = self._normalize_status(
+                status_map.get(node_id, NodeStatus.PENDING.value)
+            )
+            if node_id in status_map and current_status != NodeStatus.PENDING.value:
+                continue
+
+            incoming = self.reverse_edges.get(node_id, [])
+            if not incoming:
+                ready.append(node_id)
+                continue
+
+            is_ready = True
+            for edge in incoming:
+                source_status = self._normalize_status(
+                    status_map.get(edge.source, "")
+                )
+                if source_status != NodeStatus.COMPLETED.value:
+                    is_ready = False
+                    break
+
+                source_outcome = NodeOutcome(
+                    status=source_status,
+                    output_summary="",
+                )
+                if not self.evaluate_edge_condition(edge, source_outcome):
+                    is_ready = False
+                    break
+
+            if is_ready:
+                ready.append(node_id)
+
+        return ready
+
+    def evaluate_edge_condition(
+        self,
+        edge: GraphEdge,
+        source_outcome: Optional[NodeOutcome],
+    ) -> bool:
+        """Evaluate edge activation condition against source node output."""
+        condition = (edge.condition or "always").strip()
+
+        if not condition or condition == "always":
+            return True
+
+        if source_outcome is None:
+            logger.warning(
+                "Edge %s -> %s condition '%s' cannot be evaluated without source outcome",
+                edge.source, edge.target, condition,
+            )
+            return False
+
+        status_match = re.fullmatch(
+            r'status\s*==\s*["\'](pass|fail)["\']',
+            condition,
+        )
+        if status_match:
+            status_check = status_match.group(1)
+            actual_status = self._normalize_status(source_outcome.status)
+            if status_check == "pass":
+                return actual_status == NodeStatus.COMPLETED.value
+            return actual_status == NodeStatus.FAILED.value
+
+        output_match = re.fullmatch(
+            r'output\.([A-Za-z_][\w]*)\s*(==|!=|>=|<=|>|<)\s*(.+)',
+            condition,
+        )
+        if not output_match:
+            logger.warning(
+                "Unsupported edge condition '%s' for edge %s -> %s",
+                condition, edge.source, edge.target,
+            )
+            return False
+
+        field_name, operator, raw_value = output_match.groups()
+        try:
+            if not hasattr(source_outcome, field_name):
+                raise AttributeError(
+                    f"NodeOutcome has no field '{field_name}'"
+                )
+            actual_value = getattr(source_outcome, field_name)
+            expected_value = _parse_scalar(raw_value.strip())
+            return self._compare_values(actual_value, operator, expected_value)
+        except Exception as exc:
+            logger.warning(
+                "Failed to evaluate edge condition '%s' for edge %s -> %s: %s",
+                condition, edge.source, edge.target, exc,
+            )
+            return False
+
+    def get_downstream_nodes(self, node_id: str) -> List[str]:
+        """Return all direct downstream node IDs from node_id."""
+        return [edge.target for edge in self.forward_edges.get(node_id, [])]
+
+    def get_upstream_nodes(self, node_id: str) -> List[str]:
+        """Return all direct upstream node IDs into node_id."""
+        return [edge.source for edge in self.reverse_edges.get(node_id, [])]
+
+    def _find_cycle(self, candidates: Set[str]) -> List[str]:
+        """Return a concrete cycle path, including repeated start node."""
+        visited: Set[str] = set()
+        recursion_stack: Set[str] = set()
+        parent: Dict[str, str] = {}
+
+        def dfs(node_id: str) -> List[str]:
+            visited.add(node_id)
+            recursion_stack.add(node_id)
+
+            for edge in self.forward_edges.get(node_id, []):
+                target_id = edge.target
+                if target_id not in candidates:
+                    continue
+
+                if target_id not in visited:
+                    parent[target_id] = node_id
+                    cycle = dfs(target_id)
+                    if cycle:
+                        return cycle
+                    continue
+
+                if target_id in recursion_stack:
+                    cycle = [target_id]
+                    cursor = node_id
+                    while cursor != target_id:
+                        cycle.append(cursor)
+                        cursor = parent[cursor]
+                    cycle.append(target_id)
+                    cycle.reverse()
+                    return cycle
+
+            recursion_stack.remove(node_id)
+            return []
+
+        for node_id in candidates:
+            if node_id in visited:
+                continue
+            cycle = dfs(node_id)
+            if cycle:
+                return cycle
+
+        return []
+
+    @staticmethod
+    def _normalize_status(status: Any) -> str:
+        """Normalize status values to lowercase strings."""
+        if isinstance(status, NodeStatus):
+            return status.value
+        return str(status).strip().lower()
+
+    @staticmethod
+    def _compare_values(actual: Any, operator: str, expected: Any) -> bool:
+        """Compare values for edge condition evaluation."""
+        if operator == "==":
+            return actual == expected
+        if operator == "!=":
+            return actual != expected
+
+        try:
+            actual_num = float(actual)
+            expected_num = float(expected)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Non-numeric comparison for operator '{operator}'"
+            ) from exc
+
+        if operator == ">":
+            return actual_num > expected_num
+        if operator == "<":
+            return actual_num < expected_num
+        if operator == ">=":
+            return actual_num >= expected_num
+        if operator == "<=":
+            return actual_num <= expected_num
+        raise ValueError(f"Unsupported operator '{operator}'")
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +683,23 @@ def parse_signal(output: str) -> Dict[str, Any]:
         }
 
     try:
-        return _parse_simple_yaml(yaml_text)
+        signal = _parse_simple_yaml(yaml_text)
+        signal_type = signal.get("signal", "")
+
+        # Parse graph payloads eagerly so callers can operate on typed models.
+        if signal_type == "next_graph":
+            signal["graph"] = _parse_graph_signal(signal)
+        elif signal_type == "next_task":
+            sprints = signal.get("sprints", [])
+            if isinstance(sprints, list):
+                signal["graph"] = _sprints_to_graph(sprints, signal)
+            else:
+                logger.warning(
+                    "next_task signal contained non-list 'sprints' value: %s",
+                    type(sprints).__name__,
+                )
+
+        return signal
     except Exception as exc:
         return {
             "signal": "error",
@@ -399,43 +801,104 @@ def _parse_array(lines: List[str], start: int, parent_indent: int) -> tuple:
         if current_indent <= parent_indent:
             break
 
-        if stripped.startswith("- "):
-            item_content = stripped[2:].strip()
-
-            # Check if this array item has nested key: value pairs
-            # e.g., "- name: foo" followed by indented "  prd: bar"
-            item_match = re.match(r'^([\w_-]+)\s*:\s*(.*)', item_content)
-            if item_match:
-                # Object array item -- collect all fields at this or deeper indent
-                obj: Dict[str, Any] = {}
-                obj[item_match.group(1)] = _parse_scalar(item_match.group(2).strip())
-                item_indent = current_indent
-                i += 1
-
-                while i < len(lines):
-                    next_line = lines[i]
-                    next_stripped = next_line.strip()
-                    if not next_stripped or next_stripped.startswith("#"):
-                        i += 1
-                        continue
-                    next_indent = len(next_line) - len(next_line.lstrip())
-                    if next_indent <= item_indent:
-                        break
-                    field_match = re.match(r'^\s*([\w_-]+)\s*:\s*(.*)', next_line)
-                    if field_match:
-                        obj[field_match.group(1)] = _parse_scalar(
-                            field_match.group(2).strip()
-                        )
-                    i += 1
-
-                result.append(obj)
-            else:
-                # Simple scalar array item
-                result.append(_parse_scalar(item_content))
-                i += 1
-        else:
+        if not stripped.startswith("- "):
             # Not an array item -- we're done
             break
+
+        item_content = stripped[2:].strip()
+        item_indent = current_indent
+
+        # Empty item; parse nested value if present.
+        if item_content == "":
+            next_indent = _next_content_indent(lines, i + 1)
+            if next_indent is not None and next_indent > item_indent:
+                if _is_array_start(lines, i + 1):
+                    item_value, i = _parse_array(lines, i + 1, item_indent)
+                else:
+                    item_value, i = _parse_nested(lines, i + 1, item_indent)
+                result.append(item_value)
+            else:
+                result.append("")
+                i += 1
+            continue
+
+        # Check if this array item starts an object (e.g. "- id: foo")
+        item_match = re.match(r'^([\w_-]+)\s*:\s*(.*)', item_content)
+        if not item_match:
+            # Scalar array item
+            result.append(_parse_scalar(item_content))
+            i += 1
+            continue
+
+        # Object array item -- collect fields at this item indent.
+        obj: Dict[str, Any] = {}
+        first_key = item_match.group(1)
+        first_value_part = item_match.group(2).strip()
+
+        if first_value_part == "":
+            # The first key lives on "- key:", so nested content must be
+            # indented beyond the virtual key indent (item indent + "- ").
+            virtual_key_indent = item_indent + 2
+            next_indent = _next_content_indent(lines, i + 1)
+            if next_indent is not None and next_indent > virtual_key_indent:
+                if _is_array_start(lines, i + 1):
+                    obj[first_key], i = _parse_array(
+                        lines, i + 1, virtual_key_indent
+                    )
+                else:
+                    obj[first_key], i = _parse_nested(
+                        lines, i + 1, virtual_key_indent
+                    )
+            else:
+                obj[first_key] = ""
+                i += 1
+        else:
+            obj[first_key] = _parse_scalar(first_value_part)
+            i += 1
+
+        while i < len(lines):
+            next_line = lines[i]
+            next_stripped = next_line.strip()
+
+            if not next_stripped or next_stripped.startswith("#"):
+                i += 1
+                continue
+
+            next_indent = len(next_line) - len(next_line.lstrip())
+            if next_indent <= item_indent:
+                break
+
+            field_match = re.match(r'^\s*([\w_-]+)\s*:\s*(.*)', next_line)
+            if not field_match:
+                logger.debug(
+                    "Skipping unparseable YAML array object line %d: %s",
+                    i, next_stripped[:100],
+                )
+                i += 1
+                continue
+
+            field_key = field_match.group(1)
+            field_value_part = field_match.group(2).strip()
+
+            if field_value_part == "":
+                child_indent = _next_content_indent(lines, i + 1)
+                if child_indent is not None and child_indent > next_indent:
+                    if _is_array_start(lines, i + 1):
+                        obj[field_key], i = _parse_array(
+                            lines, i + 1, next_indent
+                        )
+                    else:
+                        obj[field_key], i = _parse_nested(
+                            lines, i + 1, next_indent
+                        )
+                else:
+                    obj[field_key] = ""
+                    i += 1
+            else:
+                obj[field_key] = _parse_scalar(field_value_part)
+                i += 1
+
+        result.append(obj)
 
     return result, i
 
@@ -507,6 +970,241 @@ def _parse_scalar(value: str) -> Any:
         pass
 
     return value
+
+
+def _parse_graph_signal(signal: Dict[str, Any]) -> Graph:
+    """Parse a next_graph signal payload into a typed Graph model."""
+    nodes_data = signal.get("nodes", [])
+    edges_data = signal.get("edges", [])
+
+    if not isinstance(nodes_data, list):
+        logger.warning(
+            "next_graph signal field 'nodes' must be a list, got %s",
+            type(nodes_data).__name__,
+        )
+        nodes_data = []
+    if not isinstance(edges_data, list):
+        logger.warning(
+            "next_graph signal field 'edges' must be a list, got %s",
+            type(edges_data).__name__,
+        )
+        edges_data = []
+
+    nodes: Dict[str, GraphNode] = {}
+    for idx, node_data in enumerate(nodes_data):
+        if not isinstance(node_data, dict):
+            logger.warning(
+                "Skipping non-dict graph node at index %d: %r",
+                idx, node_data,
+            )
+            continue
+
+        node_id = str(node_data.get("id", "")).strip()
+        if not node_id:
+            logger.warning("Skipping graph node at index %d: missing required field 'id'", idx)
+            continue
+        if node_id in nodes:
+            logger.warning("Duplicate graph node id '%s' encountered; skipping duplicate", node_id)
+            continue
+
+        node_name = str(node_data.get("name", "")).strip()
+        if not node_name:
+            logger.warning(
+                "Graph node '%s' missing required field 'name'; defaulting to node id",
+                node_id,
+            )
+            node_name = node_id
+
+        raw_node_type = node_data.get("type", NodeType.TASK.value)
+        node_type = _coerce_enum(
+            NodeType,
+            raw_node_type,
+            NodeType.TASK,
+            f"graph node '{node_id}' type",
+        )
+
+        node_class = str(node_data.get("class", node_data.get("node_class", ""))).strip()
+        if not node_class:
+            logger.warning(
+                "Skipping graph node '%s': missing required field 'class'/'node_class'",
+                node_id,
+            )
+            continue
+
+        handler = str(node_data.get("handler", "")).strip()
+        if not handler:
+            logger.warning(
+                "Skipping graph node '%s': missing required field 'handler'",
+                node_id,
+            )
+            continue
+
+        if "context_fidelity" not in node_data:
+            logger.warning(
+                "Graph node '%s' missing optional field 'context_fidelity'; defaulting to '%s'",
+                node_id, ContextFidelityMode.MINIMAL.value,
+            )
+        context_fidelity = _coerce_enum(
+            ContextFidelityMode,
+            node_data.get("context_fidelity", ContextFidelityMode.MINIMAL.value),
+            ContextFidelityMode.MINIMAL,
+            f"graph node '{node_id}' context_fidelity",
+        )
+
+        inputs_raw = node_data.get("inputs", {})
+        if inputs_raw is None:
+            inputs: Dict[str, Any] = {}
+        elif isinstance(inputs_raw, dict):
+            inputs = inputs_raw
+        else:
+            logger.warning(
+                "Graph node '%s' field 'inputs' must be an object; got %s. Using empty object.",
+                node_id, type(inputs_raw).__name__,
+            )
+            inputs = {}
+
+        max_retries_raw = node_data.get("max_retries", 3)
+        try:
+            max_retries = int(max_retries_raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Graph node '%s' has invalid max_retries=%r; defaulting to 3",
+                node_id, max_retries_raw,
+            )
+            max_retries = 3
+
+        prd_path = node_data.get("prd_path", node_data.get("prd"))
+        branch = node_data.get("branch")
+        output_path = node_data.get("output_path")
+
+        if handler == "software":
+            if not prd_path:
+                logger.warning(
+                    "Graph node '%s' missing optional field 'prd'/'prd_path'",
+                    node_id,
+                )
+            if not branch:
+                logger.warning(
+                    "Graph node '%s' missing optional field 'branch'",
+                    node_id,
+                )
+        if handler == "content" and not output_path:
+            logger.warning(
+                "Graph node '%s' missing optional field 'output_path'",
+                node_id,
+            )
+
+        nodes[node_id] = GraphNode(
+            id=node_id,
+            name=node_name,
+            type=node_type,
+            node_class=node_class,
+            handler=handler,
+            inputs=inputs,
+            context_fidelity=context_fidelity,
+            complexity_hint=_as_optional_str(node_data.get("complexity_hint")),
+            discovery_tools=_as_string_list(
+                node_data.get("discovery_tools"),
+                f"graph node '{node_id}' discovery_tools",
+            ),
+            criteria=_as_string_list(
+                node_data.get("criteria"),
+                f"graph node '{node_id}' criteria",
+            ),
+            retry_target=_as_optional_str(node_data.get("retry_target")),
+            max_retries=max_retries,
+            prd_path=_as_optional_str(prd_path),
+            branch=_as_optional_str(branch),
+            output_path=_as_optional_str(output_path),
+            source_materials=_as_string_list(
+                node_data.get("source_materials"),
+                f"graph node '{node_id}' source_materials",
+            ),
+        )
+
+    edges: List[GraphEdge] = []
+    for idx, edge_data in enumerate(edges_data):
+        if not isinstance(edge_data, dict):
+            logger.warning(
+                "Skipping non-dict graph edge at index %d: %r",
+                idx, edge_data,
+            )
+            continue
+
+        source = str(edge_data.get("source", "")).strip()
+        target = str(edge_data.get("target", "")).strip()
+        if not source or not target:
+            logger.warning(
+                "Skipping graph edge at index %d: required fields 'source' and 'target' must be non-empty",
+                idx,
+            )
+            continue
+
+        condition = str(edge_data.get("condition", "always")).strip() or "always"
+        edges.append(
+            GraphEdge(
+                source=source,
+                target=target,
+                condition=condition,
+            )
+        )
+
+    domain = _coerce_enum(
+        DomainType,
+        signal.get("domain", DomainType.SOFTWARE.value),
+        DomainType.SOFTWARE,
+        "graph domain",
+    )
+
+    return Graph(nodes=nodes, edges=edges, domain=domain)
+
+
+def _coerce_enum(
+    enum_type: Any,
+    raw_value: Any,
+    default: Any,
+    label: str,
+) -> Any:
+    """Coerce a raw value into an enum member, with warning and default."""
+    if isinstance(raw_value, enum_type):
+        return raw_value
+
+    candidate = str(raw_value).strip().lower()
+    if not candidate:
+        return default
+
+    try:
+        return enum_type(candidate)
+    except ValueError:
+        logger.warning(
+            "Invalid %s value '%s'; defaulting to '%s'",
+            label, candidate, default.value,
+        )
+        return default
+
+
+def _as_string_list(value: Any, label: str) -> List[str]:
+    """Normalize scalar-or-list values into a string list."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    if isinstance(value, str):
+        return [value]
+
+    logger.warning(
+        "Expected %s to be a list or string, got %s; defaulting to empty list",
+        label, type(value).__name__,
+    )
+    return []
+
+
+def _as_optional_str(value: Any) -> Optional[str]:
+    """Normalize optional scalar values to stripped strings."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 # ---------------------------------------------------------------------------
@@ -1191,6 +1889,98 @@ def build_pl_context(sprint: Dict[str, Any], project_dir: Path) -> str:
 # ---------------------------------------------------------------------------
 # Sprint execution
 # ---------------------------------------------------------------------------
+
+def _sanitize_graph_node_id(raw_name: str) -> str:
+    """Convert a sprint name to a stable node identifier."""
+    node_id = re.sub(r"[^a-z0-9-]", "-", raw_name.lower())
+    node_id = re.sub(r"-{2,}", "-", node_id).strip("-")
+    return node_id or "task"
+
+
+def _sprints_to_graph(
+    sprints: List[Dict[str, Any]],
+    pm_signal: Dict[str, Any],
+) -> Graph:
+    """Convert legacy next_task sprint lists into a Graph definition."""
+    nodes: Dict[str, GraphNode] = {}
+    ordered_node_ids: List[str] = []
+    parallel_flags: List[bool] = []
+    used_ids: Set[str] = set()
+
+    for idx, sprint in enumerate(sprints):
+        if not isinstance(sprint, dict):
+            logger.warning("Skipping non-dict sprint at index %d: %r", idx, sprint)
+            continue
+
+        sprint_name = str(sprint.get("name", "")).strip() or f"sprint-{idx + 1}"
+        base_id = _sanitize_graph_node_id(sprint_name)
+        node_id = base_id
+        suffix = 2
+        while node_id in used_ids:
+            node_id = f"{base_id}-{suffix}"
+            suffix += 1
+        used_ids.add(node_id)
+
+        nodes[node_id] = GraphNode(
+            id=node_id,
+            name=sprint_name,
+            type=NodeType.TASK,
+            node_class="implementation",
+            handler="software",
+            prd_path=_as_optional_str(sprint.get("prd")),
+            branch=_as_optional_str(sprint.get("branch")),
+        )
+        ordered_node_ids.append(node_id)
+        parallel_flags.append(bool(sprint.get("parallel_safe", False)))
+
+    edges: List[GraphEdge] = []
+    edge_keys: Set[Tuple[str, str]] = set()
+
+    def add_edge(source: str, target: str) -> None:
+        key = (source, target)
+        if key in edge_keys:
+            return
+        edge_keys.add(key)
+        edges.append(GraphEdge(source=source, target=target))
+
+    previous_sequential_index: Optional[int] = None
+    pending_parallel_indices: List[int] = []
+
+    for idx, is_parallel in enumerate(parallel_flags):
+        node_id = ordered_node_ids[idx]
+
+        if is_parallel:
+            if previous_sequential_index is not None:
+                # Fan-out from the most recent sequential node.
+                add_edge(ordered_node_ids[previous_sequential_index], node_id)
+                pending_parallel_indices.append(idx)
+            continue
+
+        # Current node is sequential.
+        if previous_sequential_index is not None:
+            if pending_parallel_indices:
+                # Fan-in from all parallel nodes to this sequential node.
+                for parallel_idx in pending_parallel_indices:
+                    add_edge(ordered_node_ids[parallel_idx], node_id)
+                pending_parallel_indices = []
+            else:
+                # Linear chain when no parallel segment exists.
+                add_edge(ordered_node_ids[previous_sequential_index], node_id)
+
+        previous_sequential_index = idx
+
+    domain = _coerce_enum(
+        DomainType,
+        pm_signal.get("domain", DomainType.SOFTWARE.value),
+        DomainType.SOFTWARE,
+        "next_task domain",
+    )
+    logger.info(
+        "Converted %d sprints to linear graph (backward compatibility)",
+        len(nodes),
+    )
+    return Graph(nodes=nodes, edges=edges, domain=domain)
+
 
 def execute_sprints(
     sprints: List[Dict[str, Any]],
