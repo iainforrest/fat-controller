@@ -652,6 +652,499 @@ class GraphEngine:
 
 
 # ---------------------------------------------------------------------------
+# Domain handlers
+# ---------------------------------------------------------------------------
+
+class NodeHandler:
+    """Base interface for domain-specific graph node execution."""
+
+    def execute(
+        self,
+        node: GraphNode,
+        context: str,
+        config: ModelConfig,
+        project_dir: Path,
+        cycle: int = 0,
+    ) -> NodeOutcome:
+        raise NotImplementedError(f"{self.__class__.__name__} must implement execute()")
+
+    @staticmethod
+    def _signal_to_outcome_status(signal_payload: Dict[str, Any]) -> str:
+        """Map signal payloads to checkpoint-friendly node statuses."""
+        signal_type = str(signal_payload.get("signal", "unknown")).strip().lower()
+        if signal_type == "done":
+            return NodeStatus.COMPLETED.value
+        if signal_type == "skipped":
+            return NodeStatus.SKIPPED.value
+        return NodeStatus.FAILED.value
+
+    @staticmethod
+    def _signal_summary(signal_payload: Dict[str, Any], node_id: str) -> str:
+        """Extract a concise outcome summary from a signal payload."""
+        for key in ("summary", "details", "blocker_description", "reason"):
+            value = signal_payload.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        signal_type = str(signal_payload.get("signal", "unknown")).strip().lower()
+        return f"Node '{node_id}' finished with signal '{signal_type}'"
+
+    @staticmethod
+    def _signal_error(signal_payload: Dict[str, Any], node_id: str) -> Optional[str]:
+        """Extract error details when the signal maps to a failed node."""
+        if NodeHandler._signal_to_outcome_status(signal_payload) != NodeStatus.FAILED.value:
+            return None
+        details = (
+            signal_payload.get("details")
+            or signal_payload.get("blocker_description")
+            or signal_payload.get("reason")
+        )
+        if details is None:
+            signal_type = str(signal_payload.get("signal", "unknown")).strip().lower()
+            return f"Node '{node_id}' failed with signal '{signal_type}'"
+        return str(details).strip()
+
+    @staticmethod
+    def _extract_commit_shas(signal_payload: Dict[str, Any]) -> List[str]:
+        """Normalize commit SHA fields from signal payloads."""
+        raw_commit_shas = signal_payload.get("commit_shas")
+        if isinstance(raw_commit_shas, list):
+            return [str(sha).strip() for sha in raw_commit_shas if str(sha).strip()]
+        if isinstance(raw_commit_shas, str) and raw_commit_shas.strip():
+            return [raw_commit_shas.strip()]
+        return []
+
+    @staticmethod
+    def _relative_path(path: Path, project_dir: Path) -> str:
+        """Render a path relative to project root when possible."""
+        try:
+            return str(path.resolve().relative_to(project_dir.resolve()))
+        except ValueError:
+            return str(path)
+
+
+class SoftwareHandler(NodeHandler):
+    """Execute software implementation nodes in isolated git worktrees."""
+
+    def execute(
+        self,
+        node: GraphNode,
+        context: str,
+        config: ModelConfig,
+        project_dir: Path,
+        cycle: int = 0,
+    ) -> NodeOutcome:
+        started_at = time.monotonic()
+        branch = (node.branch or f"sprint/{node.id}").strip()
+        prd_path = (
+            node.prd_path
+            or str(node.inputs.get("prd", "")).strip()
+        )
+        model_used = f"{config.provider}:{config.model}"
+        signal_payload: Dict[str, Any] = {
+            "signal": "error",
+            "error_type": "execution_failed",
+            "details": "Software handler did not produce a signal",
+        }
+        merge_success: Optional[bool] = None
+        merge_details: Optional[str] = None
+        worktree_path: Optional[Path] = None
+
+        if not prd_path:
+            return NodeOutcome(
+                status=NodeStatus.FAILED.value,
+                output_summary=f"Node '{node.id}' missing required field 'prd_path'",
+                duration=time.monotonic() - started_at,
+                model_used=model_used,
+                error_details=f"Node '{node.id}' missing required field 'prd_path'",
+            )
+
+        try:
+            worktree_path = self._create_worktree(node.id, branch, project_dir)
+            if worktree_path is None:
+                return NodeOutcome(
+                    status=NodeStatus.FAILED.value,
+                    output_summary=(
+                        f"Failed to create git worktree for node '{node.id}' (branch '{branch}')"
+                    ),
+                    duration=time.monotonic() - started_at,
+                    model_used=model_used,
+                    error_details=(
+                        f"Failed to create git worktree for node '{node.id}' (branch '{branch}')"
+                    ),
+                )
+
+            sprint_payload = {
+                "name": node.name or node.id,
+                "prd": prd_path,
+                "branch": branch,
+            }
+            pl_context = build_pl_context(sprint_payload, worktree_path)
+            if node.criteria:
+                pl_context += (
+                    "\n\nQUALITY_CRITERIA:\n"
+                    + "\n".join(f"- {criterion}" for criterion in node.criteria)
+                )
+            if node.inputs:
+                pl_context += (
+                    "\n\nNODE_INPUTS:\n"
+                    + json.dumps(node.inputs, indent=2, sort_keys=True, ensure_ascii=True)
+                )
+            if context:
+                pl_context += f"\n\nUPSTREAM_CONTEXT:\n{context}"
+
+            output = invoke_agent(
+                "pl",
+                pl_context,
+                worktree_path,
+                timeout=max(1, int(config.timeout or DEFAULT_PL_TIMEOUT)),
+                cycle=cycle,
+            )
+            signal_payload = parse_signal(output)
+        except subprocess.TimeoutExpired:
+            signal_payload = {
+                "signal": "error",
+                "error_type": "timeout",
+                "details": f"PL timed out after {max(1, int(config.timeout or DEFAULT_PL_TIMEOUT))}s",
+            }
+        except RuntimeError as exc:
+            signal_payload = {
+                "signal": "error",
+                "error_type": "invocation_failed",
+                "details": str(exc),
+            }
+        except Exception as exc:
+            signal_payload = {
+                "signal": "error",
+                "error_type": "execution_failed",
+                "details": str(exc),
+            }
+        else:
+            signal_type = str(signal_payload.get("signal", "unknown")).strip().lower()
+            if signal_type == "done":
+                merge_success, merge_details = self._merge_worktree_branch(branch, project_dir)
+                if merge_success:
+                    delete_branch(branch, project_dir)
+                else:
+                    signal_payload = dict(signal_payload)
+                    signal_payload["signal"] = "error"
+                    signal_payload["error_type"] = "merge_failed"
+                    signal_payload["details"] = merge_details or (
+                        f"Failed to merge branch '{branch}' into main"
+                    )
+                    signal_payload["merge_conflict"] = merge_details
+        finally:
+            if worktree_path is not None:
+                self._remove_worktree(node.id, project_dir)
+
+        summary = self._signal_summary(signal_payload, node.id)
+        error_details = self._signal_error(signal_payload, node.id)
+        if merge_success is False and merge_details:
+            error_details = merge_details
+
+        return NodeOutcome(
+            status=self._signal_to_outcome_status(signal_payload),
+            output_summary=summary,
+            duration=time.monotonic() - started_at,
+            model_used=model_used,
+            error_details=error_details,
+            commit_shas=self._extract_commit_shas(signal_payload),
+            merge_success=merge_success,
+            merge_details=merge_details,
+        )
+
+    def _create_worktree(
+        self,
+        node_id: str,
+        branch: str,
+        project_dir: Path,
+    ) -> Optional[Path]:
+        """Create an isolated git worktree for a graph node."""
+        if not checkout_main(project_dir):
+            logger.error(
+                "Cannot create worktree for node '%s': failed to checkout main",
+                node_id,
+            )
+            return None
+
+        safe_node_id = re.sub(r"[^a-zA-Z0-9._-]", "-", node_id).strip("-") or "node"
+        worktrees_dir = project_dir / ".worktrees"
+        worktrees_dir.mkdir(parents=True, exist_ok=True)
+        worktree_path = worktrees_dir / safe_node_id
+
+        if worktree_path.exists():
+            git_run(
+                ["worktree", "remove", str(worktree_path), "--force"],
+                project_dir,
+                check=False,
+            )
+            if worktree_path.exists():
+                shutil.rmtree(worktree_path, ignore_errors=True)
+
+        branch_exists = git_run(
+            ["rev-parse", "--verify", branch],
+            project_dir,
+            check=False,
+        ).returncode == 0
+
+        if branch_exists:
+            cmd = ["worktree", "add", str(worktree_path), branch]
+        else:
+            cmd = ["worktree", "add", str(worktree_path), "-b", branch]
+        result = git_run(cmd, project_dir, check=False)
+
+        if result.returncode != 0:
+            logger.error(
+                "Failed to create worktree for node '%s' (%s): %s",
+                node_id,
+                branch,
+                (result.stderr or result.stdout or "unknown error").strip(),
+            )
+            return None
+
+        logger.info(
+            "Created worktree for node '%s': %s (branch: %s)",
+            node_id,
+            worktree_path,
+            branch,
+        )
+        return worktree_path
+
+    def _remove_worktree(self, node_id: str, project_dir: Path) -> None:
+        """Remove node worktree after execution to avoid orphaned checkouts."""
+        safe_node_id = re.sub(r"[^a-zA-Z0-9._-]", "-", node_id).strip("-") or "node"
+        worktree_path = project_dir / ".worktrees" / safe_node_id
+        if not worktree_path.exists():
+            return
+
+        result = git_run(
+            ["worktree", "remove", str(worktree_path), "--force"],
+            project_dir,
+            check=False,
+        )
+        if result.returncode != 0:
+            logger.warning(
+                "Failed to remove worktree '%s': %s",
+                worktree_path,
+                (result.stderr or result.stdout or "unknown error").strip(),
+            )
+            if worktree_path.exists():
+                shutil.rmtree(worktree_path, ignore_errors=True)
+
+        git_run(["worktree", "prune"], project_dir, check=False)
+
+    def _merge_worktree_branch(self, branch: str, project_dir: Path) -> Tuple[bool, str]:
+        """Merge worktree branch back to main via existing merge helper."""
+        return merge_branch(branch, project_dir)
+
+
+class ContentHandler(NodeHandler):
+    """Execute non-software content-production nodes without git operations."""
+
+    def execute(
+        self,
+        node: GraphNode,
+        context: str,
+        config: ModelConfig,
+        project_dir: Path,
+        cycle: int = 0,
+    ) -> NodeOutcome:
+        started_at = time.monotonic()
+        model_used = f"{config.provider}:{config.model}"
+        work_dir = project_dir / "tasks" / node.id
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            content_context = self._build_content_context(node, context)
+            output = invoke_agent(
+                "pl",
+                content_context,
+                work_dir,
+                timeout=max(1, int(config.timeout or DEFAULT_PL_TIMEOUT)),
+                cycle=cycle,
+            )
+            signal_payload = parse_signal(output)
+        except subprocess.TimeoutExpired:
+            signal_payload = {
+                "signal": "error",
+                "error_type": "timeout",
+                "details": f"Content agent timed out after {max(1, int(config.timeout or DEFAULT_PL_TIMEOUT))}s",
+            }
+        except RuntimeError as exc:
+            signal_payload = {
+                "signal": "error",
+                "error_type": "invocation_failed",
+                "details": str(exc),
+            }
+        except Exception as exc:
+            signal_payload = {
+                "signal": "error",
+                "error_type": "execution_failed",
+                "details": str(exc),
+            }
+
+        artifacts, artifact_error = self._collect_content_artifacts(
+            node,
+            project_dir,
+            work_dir,
+        )
+        if artifact_error:
+            signal_payload = {
+                "signal": "error",
+                "error_type": "missing_output",
+                "details": artifact_error,
+            }
+
+        return NodeOutcome(
+            status=self._signal_to_outcome_status(signal_payload),
+            output_summary=self._signal_summary(signal_payload, node.id),
+            artifacts=artifacts,
+            duration=time.monotonic() - started_at,
+            model_used=model_used,
+            error_details=self._signal_error(signal_payload, node.id),
+            commit_shas=[],
+            merge_success=None,
+            merge_details=None,
+        )
+
+    def _build_content_context(self, node: GraphNode, upstream_context: str) -> str:
+        """Build content-focused context for document/report generation nodes."""
+        output_path = (
+            node.output_path
+            or str(node.inputs.get("output_path", "")).strip()
+            or f"tasks/{node.id}/output.md"
+        )
+        topic = str(node.inputs.get("topic", node.name or node.id)).strip()
+        style_guide = (
+            node.inputs.get("style_guide")
+            or node.inputs.get("style_guide_path")
+            or node.inputs.get("style")
+            or ""
+        )
+
+        parts = [
+            "CONTENT_TASK: Produce non-code deliverables only (no git operations).",
+            f"TASK_NAME: {node.name or node.id}",
+            f"TOPIC: {topic}",
+            f"OUTPUT_PATH: {output_path}",
+            f"WORKING_DIRECTORY: tasks/{node.id}",
+        ]
+        if node.source_materials:
+            parts.append(
+                "SOURCE_MATERIALS:\n"
+                + "\n".join(f"- {item}" for item in node.source_materials)
+            )
+        if node.criteria:
+            parts.append(
+                "QUALITY_CRITERIA:\n"
+                + "\n".join(f"- {criterion}" for criterion in node.criteria)
+            )
+        if style_guide:
+            parts.append(f"STYLE_GUIDE: {style_guide}")
+        if node.inputs:
+            parts.append(
+                "NODE_INPUTS:\n"
+                + json.dumps(node.inputs, indent=2, sort_keys=True, ensure_ascii=True)
+            )
+        if upstream_context:
+            parts.append(f"UPSTREAM_CONTEXT:\n{upstream_context}")
+
+        return "\n\n".join(parts)
+
+    def _collect_content_artifacts(
+        self,
+        node: GraphNode,
+        project_dir: Path,
+        work_dir: Path,
+    ) -> Tuple[List[str], Optional[str]]:
+        """Validate and collect expected content output artifacts."""
+        output_path_text = (
+            node.output_path
+            or str(node.inputs.get("output_path", "")).strip()
+        )
+
+        if output_path_text:
+            output_path = Path(output_path_text)
+            if not output_path.is_absolute():
+                output_path = project_dir / output_path
+
+            if not output_path.exists():
+                return (
+                    [],
+                    f"Expected output path '{output_path_text}' does not exist",
+                )
+
+            if output_path.is_file():
+                return ([self._relative_path(output_path, project_dir)], None)
+
+            files = sorted(path for path in output_path.rglob("*") if path.is_file())
+            if not files:
+                return (
+                    [],
+                    f"Output directory '{output_path_text}' contains no files",
+                )
+            return ([self._relative_path(path, project_dir) for path in files], None)
+
+        generated_files = sorted(path for path in work_dir.rglob("*") if path.is_file())
+        if not generated_files:
+            return (
+                [],
+                f"Node '{node.id}' produced no files in '{work_dir}' and no output_path was provided",
+            )
+        return ([self._relative_path(path, project_dir) for path in generated_files], None)
+
+
+def detect_domain(outcomes_content: str) -> DomainType:
+    """Infer orchestration domain from outcomes text using keyword density."""
+    software_keywords = (
+        "git", "code", "test", "deploy", "api", "function", "class",
+        "module", "build", "compile", "commit", "branch", "merge",
+    )
+    content_keywords = (
+        "write", "draft", "publish", "research", "report", "article",
+        "document", "review", "edit", "commentary", "presentation",
+    )
+
+    text = str(outcomes_content or "").lower()
+    software_hits = sum(
+        len(re.findall(rf"\b{re.escape(keyword)}\w*\b", text))
+        for keyword in software_keywords
+    )
+    content_hits = sum(
+        len(re.findall(rf"\b{re.escape(keyword)}\w*\b", text))
+        for keyword in content_keywords
+    )
+
+    if software_hits == 0 and content_hits == 0:
+        logger.info(
+            "Domain detection found no keywords; defaulting to %s",
+            DomainType.SOFTWARE.value,
+        )
+        return DomainType.SOFTWARE
+
+    if software_hits > content_hits * 2:
+        detected = DomainType.SOFTWARE
+    elif content_hits > software_hits * 2:
+        detected = DomainType.CONTENT
+    elif software_hits > 0 and content_hits > 0:
+        detected = DomainType.MIXED
+    elif software_hits > 0:
+        detected = DomainType.SOFTWARE
+    else:
+        detected = DomainType.CONTENT
+
+    logger.info(
+        "Domain detection: software_hits=%d, content_hits=%d, detected=%s",
+        software_hits,
+        content_hits,
+        detected.value,
+    )
+    return detected
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint manager
 # ---------------------------------------------------------------------------
 
@@ -2788,86 +3281,55 @@ def execute_sprints(
     sprints: List[Dict[str, Any]],
     state: OrchestratorState,
 ) -> List[Dict[str, Any]]:
-    """Execute sprints -- parallel if marked safe, sequential otherwise.
-
-    For parallel sprints, each PL runs on its own branch concurrently.
-    For sequential sprints, they run one at a time.
-
-    Returns a list of result dicts with 'sprint' and 'signal' keys.
-    """
-    parallel = [s for s in sprints if s.get("parallel_safe", False)]
-    sequential = [s for s in sprints if not s.get("parallel_safe", False)]
+    """Compatibility wrapper around SoftwareHandler-based node execution."""
+    handler = SoftwareHandler()
+    config = ModelConfig(
+        provider="openai",
+        model="gpt-5.3-codex",
+        reasoning_effort="medium",
+        tool_profile="codex",
+        timeout=state.pl_timeout,
+        fallback=[],
+    )
     results: List[Dict[str, Any]] = []
 
-    # --- Parallel sprints ---
-    # KNOWN LIMITATION: Parallel PLs share the same git working directory.
-    # Each PL will run `git checkout {branch}` during its boot sequence,
-    # but concurrent checkouts on the same worktree cause race conditions.
-    # For true parallel safety, this would need `git worktree add` per PL
-    # or separate cloned directories.
-    # TODO: Use git worktree for parallel PL isolation.
-    if parallel:
-        logger.warning(
-            "Parallel execution uses shared git worktree -- "
-            "concurrent PLs may interfere with each other's branch state"
-        )
-        logger.info(
-            "Forcing sequential execution for %d parallel-marked sprint(s) "
-            "until git worktree isolation is implemented",
-            len(parallel),
-        )
-        sequential = parallel + sequential
-        parallel = []
-
-    # --- Sequential sprints ---
-    for sprint in sequential:
+    for sprint in sprints:
         check_shutdown(state)
-
-        # Checkout main before creating branch
-        checkout_main(state.project_dir)
-        if not create_branch(sprint["branch"], state.project_dir):
-            results.append({
-                "sprint": sprint,
-                "signal": {
-                    "signal": "error",
-                    "error_type": "branch_creation_failed",
-                    "details": f"Failed to create branch {sprint['branch']}",
-                },
-            })
+        if not isinstance(sprint, dict):
+            logger.warning("Skipping non-dict sprint payload: %r", sprint)
             continue
 
-        context = build_pl_context(sprint, state.project_dir)
-        try:
-            output = invoke_agent(
-                "pl", context, state.project_dir, timeout=state.pl_timeout,
-                cycle=state.cycle_count,
-            )
-            sig = parse_signal(output)
-        except subprocess.TimeoutExpired:
-            sig = {
-                "signal": "error",
-                "error_type": "timeout",
-                "details": f"PL timed out after {state.pl_timeout}s",
-            }
-        except RuntimeError as exc:
-            sig = {
-                "signal": "error",
-                "error_type": "invocation_failed",
-                "details": str(exc),
-            }
-
-        results.append({"sprint": sprint, "signal": sig})
-        logger.info(
-            "Sequential sprint '%s' signal: %s",
-            sprint["name"], sig.get("signal", "unknown"),
+        sprint_name = str(sprint.get("name", "")).strip() or "Unnamed sprint"
+        node_id = str(sprint.get("graph_node_id", "")).strip() or _sanitize_graph_node_id(sprint_name)
+        branch = str(sprint.get("branch", "")).strip() or f"sprint/{node_id}"
+        node = GraphNode(
+            id=node_id,
+            name=sprint_name,
+            type=NodeType.TASK,
+            node_class="implementation",
+            handler="software",
+            prd_path=_as_optional_str(sprint.get("prd")),
+            branch=branch,
+            inputs=sprint.get("inputs", {}) if isinstance(sprint.get("inputs"), dict) else {},
+            criteria=_as_string_list(sprint.get("criteria"), f"sprint '{sprint_name}' criteria"),
         )
+        outcome = handler.execute(
+            node=node,
+            context="",
+            config=config,
+            project_dir=state.project_dir,
+            cycle=state.cycle_count,
+        )
+        result = _node_outcome_to_result(node, outcome)
+        results.append(result)
+        logger.info(
+            "Sprint '%s' signal: %s",
+            sprint_name,
+            result.get("signal", {}).get("signal", "unknown"),
+        )
+        _capture_session_logs(result.get("sprint", {}), state.project_dir, state.cycle_count)
 
-        # Capture session logs written by PL and execute agents
-        _capture_session_logs(sprint, state.project_dir, state.cycle_count)
-
-    # Return to main branch after all sprints
     checkout_main(state.project_dir)
-
     return results
 
 
@@ -3090,125 +3552,104 @@ def _describe_blocked_nodes(
     return "; ".join(blocked) if blocked else "No blocked node details available"
 
 
-def _execute_graph_node(
+def _build_node_context(
     node: GraphNode,
-    state: OrchestratorState,
+    graph_engine: GraphEngine,
+    checkpoint_manager: "CheckpointManager",
+) -> str:
+    """Build node context according to the configured fidelity mode."""
+    fidelity = _coerce_enum(
+        ContextFidelityMode,
+        node.context_fidelity,
+        ContextFidelityMode.MINIMAL,
+        f"graph node '{node.id}' context_fidelity",
+    )
+
+    if fidelity == ContextFidelityMode.MINIMAL:
+        return ""
+
+    upstream_nodes = sorted(graph_engine.get_upstream_nodes(node.id))
+    if not upstream_nodes:
+        return ""
+
+    summaries: List[Tuple[str, str]] = []
+    for upstream_id in upstream_nodes:
+        summary = checkpoint_manager.get_output_summary(upstream_id)
+        if summary is None:
+            continue
+        text = str(summary).strip()
+        if text:
+            summaries.append((upstream_id, text))
+
+    if not summaries:
+        return ""
+
+    if fidelity == ContextFidelityMode.PARTIAL:
+        clipped = [
+            (upstream_id, text[:500])
+            for upstream_id, text in summaries
+        ]
+    else:
+        clipped = summaries
+
+    lines = [
+        f"UPSTREAM_CONTEXT_FIDELITY: {fidelity.value}",
+        "UPSTREAM_NODE_SUMMARIES:",
+    ]
+    for upstream_id, text in clipped:
+        lines.append(f"- {upstream_id}: {text}")
+    return "\n".join(lines)
+
+
+def _node_outcome_to_result(
+    node: GraphNode,
+    outcome: NodeOutcome,
 ) -> Dict[str, Any]:
-    """Execute one graph node via the current placeholder handler mapping."""
+    """Translate NodeOutcome back into legacy sprint/signal shape for PM context."""
+    branch = node.branch or (
+        f"sprint/{node.id}"
+        if str(node.handler or "").strip().lower() == DomainType.SOFTWARE.value
+        else ""
+    )
     sprint_payload = {
         "name": node.name or node.id,
         "prd": node.prd_path or "",
-        "branch": node.branch or "",
+        "branch": branch,
         "parallel_safe": False,
         "graph_node_id": node.id,
     }
 
-    if node.handler == "software":
-        missing_fields = []
-        if not sprint_payload["prd"]:
-            missing_fields.append("prd_path")
-        if not sprint_payload["branch"]:
-            missing_fields.append("branch")
-        if missing_fields:
-            return {
-                "sprint": sprint_payload,
-                "signal": {
-                    "signal": "error",
-                    "error_type": "invalid_graph_node",
-                    "details": (
-                        f"Node '{node.id}' missing required field(s): "
-                        + ", ".join(missing_fields)
-                    ),
-                },
-            }
-
-        results = execute_sprints([sprint_payload], state)
-        if results:
-            return results[0]
-        return {
-            "sprint": sprint_payload,
-            "signal": {
-                "signal": "error",
-                "error_type": "execution_failed",
-                "details": "execute_sprints returned no results",
-            },
+    status = _normalize_node_status(outcome.status)
+    signal: Dict[str, Any]
+    if status == NodeStatus.COMPLETED.value:
+        signal = {
+            "signal": "done",
+            "summary": outcome.output_summary,
         }
+    elif status == NodeStatus.SKIPPED.value:
+        signal = {
+            "signal": "skipped",
+            "reason": outcome.output_summary,
+        }
+    else:
+        signal = {
+            "signal": "error",
+            "error_type": "execution_failed",
+            "details": outcome.error_details or outcome.output_summary,
+        }
+
+    if outcome.commit_shas:
+        signal["commit_shas"] = list(outcome.commit_shas)
+    if outcome.merge_success is False and outcome.merge_details:
+        signal["merge_conflict"] = outcome.merge_details
 
     return {
         "sprint": sprint_payload,
-        "signal": {
-            "signal": "error",
-            "error_type": "unsupported_handler",
-            "details": f"Unsupported graph node handler '{node.handler}'",
-        },
+        "signal": signal,
+        "merge_success": outcome.merge_success,
+        "merge_details": outcome.merge_details,
+        "artifacts": list(outcome.artifacts),
     }
-
-
-def _result_to_node_outcome(
-    node: GraphNode,
-    result: Dict[str, Any],
-    duration: float,
-) -> NodeOutcome:
-    """Translate a node execution result into a checkpoint outcome record."""
-    signal_payload = result.get("signal", {})
-    if not isinstance(signal_payload, dict):
-        signal_payload = {}
-
-    signal_type = str(signal_payload.get("signal", "unknown")).strip().lower()
-    if signal_type == "done":
-        outcome_status = NodeStatus.COMPLETED.value
-    elif signal_type in ("blocked", "error"):
-        outcome_status = NodeStatus.FAILED.value
-    elif signal_type == "skipped":
-        outcome_status = NodeStatus.SKIPPED.value
-    else:
-        outcome_status = NodeStatus.FAILED.value
-
-    summary = ""
-    for key in ("summary", "details", "blocker_description", "reason"):
-        value = signal_payload.get(key)
-        if value is None:
-            continue
-        summary = str(value).strip()
-        if summary:
-            break
-    if not summary:
-        summary = f"Node '{node.id}' finished with signal '{signal_type}'"
-
-    error_details = None
-    if outcome_status == NodeStatus.FAILED.value:
-        error_details = str(
-            signal_payload.get("details")
-            or signal_payload.get("blocker_description")
-            or signal_payload.get("reason")
-            or f"Node '{node.id}' failed with signal '{signal_type}'"
-        ).strip()
-
-    artifacts: List[str] = []
-    sprint_payload = result.get("sprint", {})
-    if isinstance(sprint_payload, dict):
-        branch = sprint_payload.get("branch")
-        if branch:
-            artifacts.append(f"branch:{branch}")
-
-    commit_shas: List[str] = []
-    raw_commit_shas = signal_payload.get("commit_shas")
-    if isinstance(raw_commit_shas, list):
-        commit_shas = [str(sha) for sha in raw_commit_shas if sha]
-    elif isinstance(raw_commit_shas, str) and raw_commit_shas.strip():
-        commit_shas = [raw_commit_shas.strip()]
-
-    return NodeOutcome(
-        status=outcome_status,
-        output_summary=summary,
-        artifacts=artifacts,
-        duration=duration,
-        model_used=node.handler,
-        error_details=error_details,
-        commit_shas=commit_shas,
-        merge_success=result.get("merge_success"),
-        merge_details=result.get("merge_details"),
-    )
 
 
 def _find_resumable_run_dir(tasks_dir: Path, graph_hash: str) -> Optional[Path]:
@@ -3259,6 +3700,11 @@ def run_orchestration(state: OrchestratorState) -> int:
     sprint_history: List[str] = []
     pl_results: Optional[List[Dict[str, Any]]] = None
     roadmap_content = read_roadmap(state)
+    stylesheet_loader = StylesheetLoader(str(state.project_dir / "model-stylesheet.yaml"))
+    handler_registry: Dict[str, NodeHandler] = {
+        DomainType.SOFTWARE.value: SoftwareHandler(),
+        DomainType.CONTENT.value: ContentHandler(),
+    }
 
     while state.cycle_count < state.max_cycles:
         check_shutdown(state)
@@ -3386,6 +3832,33 @@ def run_orchestration(state: OrchestratorState) -> int:
                     continue
                 return 1
 
+            domain_raw = pm_signal.get("domain")
+            domain_text = str(domain_raw).strip() if domain_raw is not None else ""
+            if domain_text:
+                graph.domain = _coerce_enum(
+                    DomainType,
+                    domain_text,
+                    DomainType.SOFTWARE,
+                    "graph domain",
+                )
+            else:
+                try:
+                    outcomes_content = state.outcomes_path.read_text(encoding="utf-8")
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to read OUTCOMES.md for domain detection: %s. "
+                        "Defaulting to '%s'",
+                        exc,
+                        DomainType.SOFTWARE.value,
+                    )
+                    graph.domain = DomainType.SOFTWARE
+                else:
+                    graph.domain = detect_domain(outcomes_content)
+                    logger.info(
+                        "PM signal missing domain; detected '%s' from OUTCOMES.md",
+                        graph.domain.value,
+                    )
+
             logger.info(
                 "PM planned graph with %d node(s), %d edge(s): %s",
                 len(graph.nodes),
@@ -3506,20 +3979,42 @@ def run_orchestration(state: OrchestratorState) -> int:
                     check_shutdown(state)
 
                     node = graph.nodes[node_id]
-                    started_at = time.monotonic()
-                    model_hint = f"{node.handler}:{node.node_class}"
+                    model_config = stylesheet_loader.select(node.node_class)
+                    model_hint = f"{model_config.provider}:{model_config.model}"
                     checkpoint_manager.record_node_start(node_id, model_hint)
+
+                    handler_key = str(node.handler or "").strip().lower()
+                    handler = handler_registry.get(handler_key)
+                    if handler is None:
+                        logger.warning(
+                            "Graph node '%s' requested unknown handler '%s'; defaulting to '%s'",
+                            node.id,
+                            node.handler,
+                            DomainType.SOFTWARE.value,
+                        )
+                        handler = handler_registry[DomainType.SOFTWARE.value]
+
+                    node_context = _build_node_context(
+                        node,
+                        graph_engine,
+                        checkpoint_manager,
+                    )
                     logger.info(
-                        "Executing graph node '%s' (%s)",
+                        "Executing graph node '%s' (%s via %s)",
                         node.name,
-                        node.handler,
+                        handler_key or DomainType.SOFTWARE.value,
+                        model_hint,
                     )
 
-                    result = _execute_graph_node(node, state)
+                    outcome = handler.execute(
+                        node=node,
+                        context=node_context,
+                        config=model_config,
+                        project_dir=state.project_dir,
+                        cycle=state.cycle_count,
+                    )
+                    result = _node_outcome_to_result(node, outcome)
                     node_results.append(result)
-
-                    duration = time.monotonic() - started_at
-                    outcome = _result_to_node_outcome(node, result, duration)
                     checkpoint_manager.record_node_completion(node_id, outcome)
 
                     for edge in graph_engine.forward_edges.get(node_id, []):
@@ -3535,14 +4030,18 @@ def run_orchestration(state: OrchestratorState) -> int:
                     logger.info(
                         "Graph node '%s' completed in %.1fs with signal '%s'",
                         node.name,
-                        duration,
+                        outcome.duration,
                         result.get("signal", {}).get("signal", "unknown"),
                     )
 
-                    display_map = checkpoint_manager.get_status_map()
-                    display_map[node_id] = _signal_to_display_status(
-                        result.get("signal", {})
+                    _capture_session_logs(
+                        result.get("sprint", {}),
+                        state.project_dir,
+                        state.cycle_count,
                     )
+
+                    display_map = checkpoint_manager.get_status_map()
+                    display_map[node_id] = _normalize_node_status(outcome.status)
                     logger.info("%s", render_graph_status(graph, display_map))
 
             pl_results = node_results
@@ -3561,29 +4060,6 @@ def run_orchestration(state: OrchestratorState) -> int:
                         sig.get("signal", "unknown"),
                         sig.get("details", sig.get("blocker_description", "no details")),
                     )
-
-            # Merge successful sprint branches back to main.
-            for result in categorized["succeeded"]:
-                check_shutdown(state)
-                branch = result["sprint"].get("branch", "")
-                if not branch:
-                    continue
-
-                merge_ok, merge_details = merge_branch(branch, state.project_dir)
-                result["merge_success"] = merge_ok
-                result["merge_details"] = merge_details
-
-                if merge_ok:
-                    # Clean up the merged branch (non-blocking)
-                    delete_branch(branch, state.project_dir)
-                else:
-                    # Conflict -- tag result so PM sees it needs attention.
-                    # PM will create a conflict-resolution sprint.
-                    logger.warning(
-                        "Merge conflict for sprint '%s': %s",
-                        result["sprint"].get("name", "unknown"), merge_details,
-                    )
-                    result["signal"]["merge_conflict"] = merge_details
 
             # Re-read roadmap for next PM cycle
             roadmap_content = read_roadmap(state)
