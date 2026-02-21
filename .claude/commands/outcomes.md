@@ -4,7 +4,7 @@ description: Outcomes v2 state-machine orchestrator with XML phase tracking, res
 
 # Outcomes v2 Command
 
-**Objective:** Orchestrate outcomes setup as a resumable, phase-based pipeline backed by `tasks/outcomes-setup.xml`.
+**Objective:** Orchestrate outcomes setup as a resumable, phase-based pipeline backed by `tasks/{slug}/outcomes/setup.xml`.
 
 This command is an orchestrator:
 - Delegate phase work to Task tool agents with fresh context.
@@ -23,12 +23,63 @@ Before execution:
 
 ---
 
-## 1) State File Contract (`tasks/outcomes-setup.xml`)
+## 0) Project Slug Resolution and Resume Detection (Run Before Any Path Use)
+
+Resolve and store `slug` before constructing any path in this command.
+
+Use these path variables after `slug` is set:
+- `project_root = tasks/{slug}`
+- `outcomes_root = tasks/{slug}/outcomes`
+- `setup_path = tasks/{slug}/outcomes/setup.xml`
+
+Startup scan (before discovery):
+1. Scan for `tasks/*/outcomes/setup.xml`.
+2. Exclude anything under `tasks/archive/`.
+3. For each discovered file:
+   - Parse XML safely.
+   - Determine first incomplete phase (`status != "complete"`).
+   - If parse fails, warn and skip that project.
+4. Build an `incomplete_projects` list with `{slug, first_incomplete_phase}`.
+5. If `incomplete_projects` is non-empty, display entries and ask:
+   - `Found incomplete project: {slug} ({phase} in progress). Resume? (y/n)`
+6. If user confirms resume:
+   - Set `slug` to the selected project slug.
+   - Load `tasks/{slug}/outcomes/setup.xml`.
+   - Jump directly to that project's first incomplete phase.
+7. If user declines resume, continue with new project creation.
+8. If `incomplete_projects` is empty, continue with new project creation.
+
+Legacy detection:
+1. Check for legacy file `tasks/outcomes-setup.xml`.
+2. If it exists:
+   - Warn that legacy pre-restructure state was detected.
+   - Offer to move legacy files to `tasks/archive/orphaned-pre-restructure/`.
+
+New project naming (when not resuming):
+1. Ask project naming question as the first discovery question (Round 1, Question 1).
+2. Derive `slug` from project name using this algorithm:
+   - lowercase
+   - strip special characters
+   - collapse whitespace and non-alphanumeric runs to `-`
+   - trim leading and trailing `-`
+3. Slug must match: `[a-z0-9]+(-[a-z0-9]+)*`
+4. If slug is empty or invalid, ask for a new project name and retry.
+5. If `tasks/{slug}/outcomes/setup.xml` exists:
+   - If all phases are `complete`, offer:
+     - archive and start fresh, or
+     - pick a different project name
+   - If any phase is incomplete, offer to resume.
+6. Persist `slug` for all subsequent path construction.
+7. Create directories early: `mkdir -p tasks/{slug}/outcomes/red-team/`.
+
+---
+
+## 1) State File Contract (`tasks/{slug}/outcomes/setup.xml`)
 
 ### File Location
 
-- State file: `tasks/outcomes-setup.xml`
-- Corrupt backups: `tasks/outcomes-setup.corrupt-<timestamp>.xml`
+- State file: `tasks/{slug}/outcomes/setup.xml`
+- Corrupt backups: `tasks/{slug}/outcomes/setup.corrupt-<timestamp>.xml`
 
 ### Allowed Status Values
 
@@ -47,6 +98,7 @@ Use only:
     <created_at>2026-02-20T12:30:00Z</created_at>
     <last_updated_at>2026-02-20T12:30:00Z</last_updated_at>
     <project_path>/absolute/project/path</project_path>
+    <project_slug>{slug}</project_slug>
   </metadata>
 
   <phases>
@@ -54,7 +106,7 @@ Use only:
       <started_at></started_at>
       <completed_at></completed_at>
       <failed_at></failed_at>
-      <output_file>tasks/outcomes-draft.md</output_file>
+      <output_file>tasks/{slug}/outcomes/draft.md</output_file>
       <summary></summary>
     </phase>
 
@@ -62,7 +114,7 @@ Use only:
       <started_at></started_at>
       <completed_at></completed_at>
       <failed_at></failed_at>
-      <output_file>tasks/red-team/</output_file>
+      <output_file>tasks/{slug}/outcomes/red-team/</output_file>
       <summary></summary>
       <agents>
         <agent id="paperclip-maximizer" status="not_started">
@@ -70,7 +122,7 @@ Use only:
           <completed_at></completed_at>
           <failed_at></failed_at>
           <attempts>0</attempts>
-          <output_file>tasks/red-team/paperclip-maximizer.md</output_file>
+          <output_file>tasks/{slug}/outcomes/red-team/paperclip-maximizer.md</output_file>
           <last_error></last_error>
         </agent>
         <agent id="pre-mortem" status="not_started">
@@ -78,7 +130,7 @@ Use only:
           <completed_at></completed_at>
           <failed_at></failed_at>
           <attempts>0</attempts>
-          <output_file>tasks/red-team/pre-mortem.md</output_file>
+          <output_file>tasks/{slug}/outcomes/red-team/pre-mortem.md</output_file>
           <last_error></last_error>
         </agent>
         <agent id="boundary-tester" status="not_started">
@@ -86,7 +138,7 @@ Use only:
           <completed_at></completed_at>
           <failed_at></failed_at>
           <attempts>0</attempts>
-          <output_file>tasks/red-team/boundary-tester.md</output_file>
+          <output_file>tasks/{slug}/outcomes/red-team/boundary-tester.md</output_file>
           <last_error></last_error>
         </agent>
         <agent id="stakeholder-advocate" status="not_started">
@@ -94,7 +146,7 @@ Use only:
           <completed_at></completed_at>
           <failed_at></failed_at>
           <attempts>0</attempts>
-          <output_file>tasks/red-team/stakeholder-advocate.md</output_file>
+          <output_file>tasks/{slug}/outcomes/red-team/stakeholder-advocate.md</output_file>
           <last_error></last_error>
         </agent>
         <agent id="specification-gamer" status="not_started">
@@ -102,7 +154,7 @@ Use only:
           <completed_at></completed_at>
           <failed_at></failed_at>
           <attempts>0</attempts>
-          <output_file>tasks/red-team/specification-gamer.md</output_file>
+          <output_file>tasks/{slug}/outcomes/red-team/specification-gamer.md</output_file>
           <last_error></last_error>
         </agent>
       </agents>
@@ -112,7 +164,7 @@ Use only:
       <started_at></started_at>
       <completed_at></completed_at>
       <failed_at></failed_at>
-      <output_file>tasks/red-team/synthesis.md</output_file>
+      <output_file>tasks/{slug}/outcomes/red-team/synthesis.md</output_file>
       <summary></summary>
     </phase>
 
@@ -120,7 +172,7 @@ Use only:
       <started_at></started_at>
       <completed_at></completed_at>
       <failed_at></failed_at>
-      <output_file>tasks/CONTEXT.md</output_file>
+      <output_file>tasks/{slug}/outcomes/context.md</output_file>
       <summary></summary>
     </phase>
 
@@ -128,7 +180,7 @@ Use only:
       <started_at></started_at>
       <completed_at></completed_at>
       <failed_at></failed_at>
-      <output_file>tasks/outcomes-refined.md</output_file>
+      <output_file>tasks/{slug}/outcomes/refined.md</output_file>
       <summary></summary>
     </phase>
 
@@ -136,7 +188,7 @@ Use only:
       <started_at></started_at>
       <completed_at></completed_at>
       <failed_at></failed_at>
-      <output_file>tasks/OUTCOMES.md</output_file>
+      <output_file>tasks/{slug}/OUTCOMES.md</output_file>
       <summary></summary>
     </phase>
   </phases>
@@ -158,19 +210,20 @@ Use only:
 
 ### First Invocation (File Missing)
 
-If `tasks/outcomes-setup.xml` does not exist:
-1. Ensure `tasks/` exists.
+If `tasks/{slug}/outcomes/setup.xml` does not exist:
+1. Ensure `tasks/{slug}/outcomes/red-team/` exists.
 2. Create the XML file with all phase and red-team agent statuses set to `not_started`.
 3. Set both `metadata.created_at` and `metadata.last_updated_at` to current ISO-8601 timestamp.
 4. Set `metadata.project_path` to current working directory.
+5. Set `metadata.project_slug` to the resolved slug.
 
 ### Existing File (Read + Validate)
 
-1. Read `tasks/outcomes-setup.xml`.
+1. Read `tasks/{slug}/outcomes/setup.xml`.
 2. Attempt XML parse.
 3. Validate required structure:
 - `<outcomes_setup>`
-- `<metadata>` with `created_at`, `last_updated_at`, `project_path`
+- `<metadata>` with `created_at`, `last_updated_at`, `project_path`, `project_slug`
 - `<phases>` with all six required phase IDs
 - `<agents>` for `red-team`
 
@@ -179,19 +232,19 @@ If validation fails, treat as corrupt.
 ### Corrupt/Malformed XML Handling
 
 On parse/validation failure:
-1. Create backup: `tasks/outcomes-setup.corrupt-<YYYYMMDDTHHMMSSZ>.xml`
+1. Create backup: `tasks/{slug}/outcomes/setup.corrupt-<YYYYMMDDTHHMMSSZ>.xml`
 2. Preserve exact original bytes in backup.
 3. Display clear error with parse/validation reason.
 4. Offer:
-- `(1) Start fresh with new outcomes-setup.xml`
+- `(1) Start fresh with new tasks/{slug}/outcomes/setup.xml`
 - `(2) Cancel`
 5. Only create a fresh file if user selects `(1)`.
 
 ### Atomic Write Rule (Mandatory)
 
-All updates to `tasks/outcomes-setup.xml` must be atomic:
+All updates to `tasks/{slug}/outcomes/setup.xml` must be atomic:
 1. Render full XML content in memory.
-2. Write to temporary file in same directory: `tasks/outcomes-setup.xml.tmp`
+2. Write to temporary file in same directory: `tasks/{slug}/outcomes/setup.xml.tmp`
 3. Flush write completely.
 4. Rename temp file over target (`rename`/move in same filesystem).
 5. Update `metadata.last_updated_at` on every write.
@@ -289,12 +342,12 @@ Use Task tool agents with fresh context for each phase.
 ### File-Based Handoff Rule
 
 Pass only explicit input files required for each phase:
-- `discovery`: input context + user responses; output `tasks/outcomes-draft.md`
-- `red-team`: input `tasks/outcomes-draft.md`; outputs `tasks/red-team/*.md`
-- `synthesis`: input red-team outputs; output `tasks/red-team/synthesis.md`
-- `context`: input draft+synthesis+memory files; output `tasks/CONTEXT.md`
-- `refinement`: input synthesis+context+draft; output `tasks/outcomes-refined.md`
-- `finalize`: input refined outputs; outputs `tasks/OUTCOMES.md`, `tasks/PROJECT_STATE.md`, `tasks/DECISIONS.md`
+- `discovery`: input context + user responses; output `tasks/{slug}/outcomes/draft.md`
+- `red-team`: input `tasks/{slug}/outcomes/draft.md`; outputs `tasks/{slug}/outcomes/red-team/*.md`
+- `synthesis`: input red-team outputs; output `tasks/{slug}/outcomes/red-team/synthesis.md`
+- `context`: input draft+synthesis+memory files; output `tasks/{slug}/outcomes/context.md`
+- `refinement`: input synthesis+context+draft; output `tasks/{slug}/outcomes/refined.md`
+- `finalize`: input refined outputs; outputs `tasks/{slug}/OUTCOMES.md`, `tasks/{slug}/PROJECT_STATE.md`, `tasks/{slug}/DECISIONS.md`
 
 Do not grant broad implicit project context to agents when explicit file inputs are sufficient.
 
@@ -331,11 +384,11 @@ Task(
 For `red-team`, dispatch all incomplete agents in parallel Task calls in a single batch.
 
 Use lens-specific prompts and fixed outputs:
-- `paperclip-maximizer` -> `tasks/red-team/paperclip-maximizer.md`
-- `pre-mortem` -> `tasks/red-team/pre-mortem.md`
-- `boundary-tester` -> `tasks/red-team/boundary-tester.md`
-- `stakeholder-advocate` -> `tasks/red-team/stakeholder-advocate.md`
-- `specification-gamer` -> `tasks/red-team/specification-gamer.md`
+- `paperclip-maximizer` -> `tasks/{slug}/outcomes/red-team/paperclip-maximizer.md`
+- `pre-mortem` -> `tasks/{slug}/outcomes/red-team/pre-mortem.md`
+- `boundary-tester` -> `tasks/{slug}/outcomes/red-team/boundary-tester.md`
+- `stakeholder-advocate` -> `tasks/{slug}/outcomes/red-team/stakeholder-advocate.md`
+- `specification-gamer` -> `tasks/{slug}/outcomes/red-team/specification-gamer.md`
 
 Pattern:
 
@@ -382,19 +435,19 @@ If validation fails:
 - Never overwrite corrupt XML without first creating a backup.
 - Always show status before doing work.
 
-This command establishes the outcomes-v2 orchestration foundation around `tasks/outcomes-setup.xml`.
+This command establishes the outcomes-v2 orchestration foundation around `tasks/{slug}/outcomes/setup.xml`.
 
 ---
 
 ## 8) Discovery Phase Agent Contract (Interactive)
 
-The `discovery` phase is interactive and must run in conversational rounds while persisting progress to `tasks/outcomes-draft.md`.
+The `discovery` phase is interactive and must run in conversational rounds while persisting progress to `tasks/{slug}/outcomes/draft.md`.
 
 ### Discovery Start/Resume Rules
 
 When `discovery` is selected as the first incomplete phase:
 1. If phase status is `not_started`, set it to `in_progress` and set `started_at` (if empty).
-2. If phase status is already `in_progress`, attempt resume from `tasks/outcomes-draft.md`.
+2. If phase status is already `in_progress`, attempt resume from `tasks/{slug}/outcomes/draft.md`.
 3. If a partial draft exists, count currently defined outcomes across primary/secondary/stretch and display:
    - `Resuming discovery. We had X outcomes defined.`
 4. Keep `discovery` status as `in_progress` until completion validation passes.
@@ -408,7 +461,11 @@ When `discovery` is selected as the first incomplete phase:
 
 Round flow:
 1. Round 1 (Open Context Gathering):
-   - Understand problem, users/stakeholders, desired change, and why now.
+   - Question 1 must be project naming:
+     - `What should this project be called?`
+   - Convert the project name to `slug` using the mandatory slug algorithm from Section 0.
+   - If this is a resumed project, skip the naming question and reuse the resolved slug.
+   - Then understand problem, users/stakeholders, desired change, and why now.
 2. Round 2 (Outcome Extraction and Proposal):
    - Propose candidate outcomes grouped as `primary`, `secondary`, and `stretch`.
    - Ask user to confirm, reorder, merge, or split outcomes.
@@ -441,9 +498,9 @@ Completion minimums:
 - At least 1 `primary` outcome is mandatory.
 - Every listed outcome must include at least 1 measurable success criterion.
 
-### Discovery Draft Output (`tasks/outcomes-draft.md`)
+### Discovery Draft Output (`tasks/{slug}/outcomes/draft.md`)
 
-Discovery writes/updates `tasks/outcomes-draft.md` throughout the session using this structure:
+Discovery writes/updates `tasks/{slug}/outcomes/draft.md` throughout the session using this structure:
 
 ```markdown
 # Outcomes Draft
@@ -489,7 +546,7 @@ Required sections for completion gating:
 ### Partial Save and Abandonment Handling
 
 If user cancels or abandons mid-discovery:
-1. Persist latest structured draft to `tasks/outcomes-draft.md`.
+1. Persist latest structured draft to `tasks/{slug}/outcomes/draft.md`.
 2. Include incomplete marker:
    - `<!-- discovery_status: in_progress -->`
 3. Preserve whatever is known (even partial outcomes/constraints/non-goals).
@@ -499,8 +556,8 @@ If user cancels or abandons mid-discovery:
 ### Discovery Completion Signaling to Orchestrator
 
 Before marking discovery `complete`, validate:
-1. `tasks/outcomes-draft.md` exists.
-2. `tasks/outcomes-draft.md` is non-empty.
+1. `tasks/{slug}/outcomes/draft.md` exists.
+2. `tasks/{slug}/outcomes/draft.md` is non-empty.
 3. At least 1 primary outcome exists.
 4. Every outcome includes at least 1 measurable success criterion.
 
@@ -522,18 +579,18 @@ If validation fails:
 
 ## 9) Red-Team Phase Agent Contracts (5 Adversarial Lenses)
 
-The `red-team` phase stress-tests `tasks/outcomes-draft.md` using five independent adversarial lenses.
+The `red-team` phase stress-tests `tasks/{slug}/outcomes/draft.md` using five independent adversarial lenses.
 
 ### Red-Team Inputs, Outputs, and Setup
 
-- Allowed input for each lens: `tasks/outcomes-draft.md` only.
-- Pre-spawn setup: create output directory with `mkdir -p tasks/red-team`.
+- Allowed input for each lens: `tasks/{slug}/outcomes/draft.md` only.
+- Pre-spawn setup: create output directory with `mkdir -p tasks/{slug}/outcomes/red-team/`.
 - Fixed outputs:
-  - `paperclip-maximizer` -> `tasks/red-team/paperclip-maximizer.md`
-  - `pre-mortem` -> `tasks/red-team/pre-mortem.md`
-  - `boundary-tester` -> `tasks/red-team/boundary-tester.md`
-  - `stakeholder-advocate` -> `tasks/red-team/stakeholder-advocate.md`
-  - `specification-gamer` -> `tasks/red-team/specification-gamer.md`
+  - `paperclip-maximizer` -> `tasks/{slug}/outcomes/red-team/paperclip-maximizer.md`
+  - `pre-mortem` -> `tasks/{slug}/outcomes/red-team/pre-mortem.md`
+  - `boundary-tester` -> `tasks/{slug}/outcomes/red-team/boundary-tester.md`
+  - `stakeholder-advocate` -> `tasks/{slug}/outcomes/red-team/stakeholder-advocate.md`
+  - `specification-gamer` -> `tasks/{slug}/outcomes/red-team/specification-gamer.md`
 
 ### Lens A: Paperclip Maximizer (`paperclip-maximizer`)
 
@@ -542,9 +599,9 @@ Purpose:
 - Apply specification-gaming framing from DeepMind research (proxy optimization diverges from true intent).
 
 Minimum required coverage:
-- For every outcome in `tasks/outcomes-draft.md`, produce at least 2 distinct gaming scenarios.
+- For every outcome in `tasks/{slug}/outcomes/draft.md`, produce at least 2 distinct gaming scenarios.
 
-Required output format (`tasks/red-team/paperclip-maximizer.md`):
+Required output format (`tasks/{slug}/outcomes/red-team/paperclip-maximizer.md`):
 - `Lens Description`
 - `Findings` (repeat per finding):
   - `Title`
@@ -562,7 +619,7 @@ Task(
   subagent_type: "general-purpose",
   prompt: """
   You are the Paperclip Maximizer red-team lens.
-  Read only: tasks/outcomes-draft.md
+  Read only: tasks/{slug}/outcomes/draft.md
 
   Goal:
   - Find how each outcome could be over-optimized in ways that satisfy metrics while violating intent.
@@ -570,7 +627,7 @@ Task(
   - Produce >=2 gaming scenarios per outcome.
 
   Write output to:
-  - tasks/red-team/paperclip-maximizer.md
+  - tasks/{slug}/outcomes/red-team/paperclip-maximizer.md
 
   Follow the required output format exactly.
   """
@@ -586,7 +643,7 @@ Minimum required coverage:
 - At least 3 failure modes spanning technical, organizational, and external factors.
 - Every failure mode must include likelihood and impact.
 
-Required output format (`tasks/red-team/pre-mortem.md`):
+Required output format (`tasks/{slug}/outcomes/red-team/pre-mortem.md`):
 - `Lens Description`
 - `Failure Modes` (repeat per mode):
   - `Title`
@@ -605,7 +662,7 @@ Task(
   subagent_type: "general-purpose",
   prompt: """
   You are the Pre-Mortem red-team lens.
-  Read only: tasks/outcomes-draft.md
+  Read only: tasks/{slug}/outcomes/draft.md
 
   Prompt:
   - Imagine this project has failed spectacularly. Why?
@@ -613,7 +670,7 @@ Task(
   - Cover technical, organizational, and external failure paths.
 
   Write output to:
-  - tasks/red-team/pre-mortem.md
+  - tasks/{slug}/outcomes/red-team/pre-mortem.md
 
   Follow the required output format exactly.
   """
@@ -628,7 +685,7 @@ Purpose:
 Minimum required coverage:
 - At least 5 edge cases across multiple boundary types.
 
-Required output format (`tasks/red-team/boundary-tester.md`):
+Required output format (`tasks/{slug}/outcomes/red-team/boundary-tester.md`):
 - `Lens Description`
 - `Edge Cases` (repeat per case):
   - `Title`
@@ -647,14 +704,14 @@ Task(
   subagent_type: "general-purpose",
   prompt: """
   You are the Boundary Tester red-team lens.
-  Read only: tasks/outcomes-draft.md
+  Read only: tasks/{slug}/outcomes/draft.md
 
   Goal:
   - Find >=5 edge cases across input, state, timing, and scale boundaries.
   - Include invalid input, race conditions, and limit behavior.
 
   Write output to:
-  - tasks/red-team/boundary-tester.md
+  - tasks/{slug}/outcomes/red-team/boundary-tester.md
 
   Follow the required output format exactly.
   """
@@ -669,7 +726,7 @@ Purpose:
 Minimum required coverage:
 - Analyze at least 2 stakeholder groups not fully represented in the draft.
 
-Required output format (`tasks/red-team/stakeholder-advocate.md`):
+Required output format (`tasks/{slug}/outcomes/red-team/stakeholder-advocate.md`):
 - `Lens Description`
 - `Stakeholder Impacts` (repeat per impact):
   - `Stakeholder Group`
@@ -688,7 +745,7 @@ Task(
   subagent_type: "general-purpose",
   prompt: """
   You are the Stakeholder Advocate red-team lens.
-  Read only: tasks/outcomes-draft.md
+  Read only: tasks/{slug}/outcomes/draft.md
 
   Goal:
   - Identify downstream impacts not explicitly captured in the outcomes.
@@ -696,7 +753,7 @@ Task(
   - Analyze >=2 stakeholder groups.
 
   Write output to:
-  - tasks/red-team/stakeholder-advocate.md
+  - tasks/{slug}/outcomes/red-team/stakeholder-advocate.md
 
   Follow the required output format exactly.
   """
@@ -712,7 +769,7 @@ Purpose:
 Minimum required coverage:
 - For every outcome, produce at least 2 concrete gaming strategies and mitigations.
 
-Required output format (`tasks/red-team/specification-gamer.md`):
+Required output format (`tasks/{slug}/outcomes/red-team/specification-gamer.md`):
 - `Lens Description`
 - `Gaming Paths` (repeat per finding):
   - `Title`
@@ -731,7 +788,7 @@ Task(
   subagent_type: "general-purpose",
   prompt: """
   You are the Specification Gamer red-team lens.
-  Read only: tasks/outcomes-draft.md
+  Read only: tasks/{slug}/outcomes/draft.md
 
   Goal:
   - Find how an AI agent could technically satisfy outcomes while violating intent.
@@ -739,7 +796,7 @@ Task(
   - Prioritize /orchestrate execution safety.
 
   Write output to:
-  - tasks/red-team/specification-gamer.md
+  - tasks/{slug}/outcomes/red-team/specification-gamer.md
 
   Follow the required output format exactly.
   """
@@ -753,12 +810,12 @@ Task(
 ### Parallel Spawn via Agent Teams (Mandatory)
 
 For phase `red-team`:
-1. Ensure `tasks/red-team/` exists before spawning.
+1. Ensure `tasks/{slug}/outcomes/red-team/` exists before spawning.
 2. Select agents with status `not_started` or `in_progress`.
 3. Spawn all selected agents in one parallel batch via Task tool.
 4. Start all five lenses within 5 seconds when all are eligible.
 5. Set timeout per agent to 5 minutes.
-6. Pass only one input file to each agent: `tasks/outcomes-draft.md`.
+6. Pass only one input file to each agent: `tasks/{slug}/outcomes/draft.md`.
 
 Pattern:
 
@@ -828,17 +885,17 @@ Synthesis input contract:
 ## 11) Synthesis Phase Agent Contract (Merge, Deduplicate, Recommend)
 
 The `synthesis` phase consolidates red-team findings into one decision artifact:
-- Output: `tasks/red-team/synthesis.md`
+- Output: `tasks/{slug}/outcomes/red-team/synthesis.md`
 - Purpose: produce deduplicated critical findings, actionable constraints, anti-outcomes, and a risk matrix.
 
 ### Synthesis Inputs and Coverage Detection
 
 Attempt to read these files in this order:
-1. `tasks/red-team/paperclip-maximizer.md`
-2. `tasks/red-team/pre-mortem.md`
-3. `tasks/red-team/boundary-tester.md`
-4. `tasks/red-team/stakeholder-advocate.md`
-5. `tasks/red-team/specification-gamer.md`
+1. `tasks/{slug}/outcomes/red-team/paperclip-maximizer.md`
+2. `tasks/{slug}/outcomes/red-team/pre-mortem.md`
+3. `tasks/{slug}/outcomes/red-team/boundary-tester.md`
+4. `tasks/{slug}/outcomes/red-team/stakeholder-advocate.md`
+5. `tasks/{slug}/outcomes/red-team/specification-gamer.md`
 
 Build:
 - `available_lenses`: files that exist and are non-empty
@@ -941,7 +998,7 @@ Rules:
 2. Prioritize anti-outcomes that prevent "metric pass, intent fail" behavior.
 3. Keep language testable and observable.
 
-### Required Output Structure (`tasks/red-team/synthesis.md`)
+### Required Output Structure (`tasks/{slug}/outcomes/red-team/synthesis.md`)
 
 ```markdown
 # Red-Team Synthesis
@@ -995,11 +1052,11 @@ Task(
   prompt: """
   Phase: synthesis
   Read available files only:
-  - tasks/red-team/paperclip-maximizer.md
-  - tasks/red-team/pre-mortem.md
-  - tasks/red-team/boundary-tester.md
-  - tasks/red-team/stakeholder-advocate.md
-  - tasks/red-team/specification-gamer.md
+  - tasks/{slug}/outcomes/red-team/paperclip-maximizer.md
+  - tasks/{slug}/outcomes/red-team/pre-mortem.md
+  - tasks/{slug}/outcomes/red-team/boundary-tester.md
+  - tasks/{slug}/outcomes/red-team/stakeholder-advocate.md
+  - tasks/{slug}/outcomes/red-team/specification-gamer.md
 
   Requirements:
   - Handle missing files gracefully and explicitly report missing lenses.
@@ -1007,7 +1064,7 @@ Task(
   - Keep lens attribution when findings are merged.
   - Generate constraints grouped into Hard/Soft/Boundaries.
   - Generate anti-outcomes in exact required format.
-  - Write final synthesis to tasks/red-team/synthesis.md.
+  - Write final synthesis to tasks/{slug}/outcomes/red-team/synthesis.md.
   """
 )
 ```
@@ -1015,7 +1072,7 @@ Task(
 ### Completion Validation for `synthesis` Phase
 
 Before marking `synthesis` phase `complete`:
-1. Verify `tasks/red-team/synthesis.md` exists.
+1. Verify `tasks/{slug}/outcomes/red-team/synthesis.md` exists.
 2. Verify file is non-empty.
 3. Verify required sections are present:
    - `Executive Summary`
@@ -1045,18 +1102,18 @@ If `.ai/` does not exist, or required memory files cannot be read:
 3. Discovery must compensate with extended questioning (additional rounds) to capture architecture assumptions, dependencies, and constraints directly from user input.
 4. Context phase must explicitly record:
    - `No prior art found - greenfield project`
-5. `tasks/CONTEXT.md` must list missing inputs under `Input Coverage` and mark the run as degraded context mode.
+5. `tasks/{slug}/outcomes/context.md` must list missing inputs under `Input Coverage` and mark the run as degraded context mode.
 6. All phase agents must use available files only and continue with partial inputs instead of hard-failing.
 
-### 15.2 Large Outcomes Stress Handling (`tasks/outcomes-draft.md` 500+ Lines)
+### 15.2 Large Outcomes Stress Handling (`tasks/{slug}/outcomes/draft.md` 500+ Lines)
 
 When the draft is large (500+ lines), keep handoffs file-based and apply bounded processing:
-1. Never inline full `tasks/outcomes-draft.md` into prompts; pass file path only.
+1. Never inline full `tasks/{slug}/outcomes/draft.md` into prompts; pass file path only.
 2. Red-team lenses must start with a short structural index (outcome IDs and sections) before deep analysis to keep reasoning organized.
 3. Process findings in batches when needed (per outcome group or severity group) and merge incrementally.
 4. If synthesis input volume is high, produce:
-   - Primary synthesis: `tasks/red-team/synthesis.md`
-   - Optional overflow details: `tasks/red-team/synthesis-appendix.md`
+   - Primary synthesis: `tasks/{slug}/outcomes/red-team/synthesis.md`
+   - Optional overflow details: `tasks/{slug}/outcomes/red-team/synthesis-appendix.md`
 5. If any lens output is too large/noisy, summarize repetitive findings while preserving all critical/high-severity issues and explicit mitigations.
 
 ### 15.3 Progress Indicator Formats (Red-Team and Synthesis)
@@ -1090,9 +1147,9 @@ Behavior:
    - `boundary` -> `boundary-tester`
    - `stakeholder` -> `stakeholder-advocate`
    - `spec-gamer` -> `specification-gamer`
-2. `[file]` is optional; default is `tasks/outcomes-draft.md`.
+2. `[file]` is optional; default is `tasks/{slug}/outcomes/draft.md`.
 3. Any readable specification file path is allowed (for example PRDs or task specs).
-4. Output defaults to `tasks/red-team/<resolved-lens>.md` unless caller overrides destination.
+4. Output defaults to `tasks/{slug}/outcomes/red-team/<resolved-lens>.md` unless caller overrides destination.
 5. Standalone lens mode does not require all pipeline phases to be complete.
 6. Unknown lens names must fail fast with a usage hint showing valid lens values.
 
@@ -1103,14 +1160,14 @@ Behavior:
 The `finalize` phase creates execution-ready project artifacts from refinement outputs.
 
 - Primary outputs:
-  - `tasks/OUTCOMES.md`
-  - `tasks/PROJECT_STATE.md`
-  - `tasks/DECISIONS.md`
+  - `tasks/{slug}/OUTCOMES.md`
+  - `tasks/{slug}/PROJECT_STATE.md`
+  - `tasks/{slug}/DECISIONS.md`
 - Required inputs:
-  - `tasks/outcomes-refined.md`
-  - `tasks/OUTCOMES_STATE.md`
+  - `tasks/{slug}/outcomes/refined.md`
+  - `tasks/{slug}/outcomes/state.md`
 - Supporting input:
-  - `tasks/CONTEXT.md` (for dependency reference in `PROJECT_STATE.md`)
+  - `tasks/{slug}/outcomes/context.md` (for dependency reference in `PROJECT_STATE.md`)
 
 ### Finalize Entry Rules
 
@@ -1120,9 +1177,9 @@ When `finalize` is selected as the first incomplete phase:
 3. If required inputs are missing, set phase `failed` with explicit missing-file summary.
 4. If required inputs pass, generate all three outputs in one finalize run.
 
-### 14.1 Generate Enhanced `tasks/OUTCOMES.md` (Backward Compatible + Additive)
+### 14.1 Generate Enhanced `tasks/{slug}/OUTCOMES.md` (Backward Compatible + Additive)
 
-Build `tasks/OUTCOMES.md` from `tasks/outcomes-refined.md` using the `project-lead.md` outcomes template as the base structure:
+Build `tasks/{slug}/OUTCOMES.md` from `tasks/{slug}/outcomes/refined.md` using the `project-lead.md` outcomes template as the base structure:
 
 ```markdown
 # Project Outcomes: [Project Name]
@@ -1160,9 +1217,9 @@ Additive section rules (append at end only; do not alter base template shape):
    - Include finalized anti-outcomes using:
      - `Do NOT: [anti-outcome] -- Prevents: [failure/gaming mode]`
 
-### 14.2 Generate `tasks/PROJECT_STATE.md` (Execution Initialization)
+### 14.2 Generate `tasks/{slug}/PROJECT_STATE.md` (Execution Initialization)
 
-Generate `tasks/PROJECT_STATE.md` using the `project-lead.md` template structure:
+Generate `tasks/{slug}/PROJECT_STATE.md` using the `project-lead.md` template structure:
 
 ```markdown
 # Project State: [Project Name]
@@ -1189,11 +1246,11 @@ Initialization requirements:
 5. Set `Tasks` to `None`.
 6. Set `Active Blockers` to `None`.
 7. Set `Questions for Iain` to `None`.
-8. Add a context reference line pointing to `tasks/CONTEXT.md` for dependencies/assumptions.
+8. Add a context reference line pointing to `tasks/{slug}/outcomes/context.md` for dependencies/assumptions.
 
-### 14.3 Generate `tasks/DECISIONS.md` (Seed from Refinement State)
+### 14.3 Generate `tasks/{slug}/DECISIONS.md` (Seed from Refinement State)
 
-Generate `tasks/DECISIONS.md` using the `project-lead.md` decision-log template:
+Generate `tasks/{slug}/DECISIONS.md` using the `project-lead.md` decision-log template:
 
 ```markdown
 # Decision Log: [Project Name]
@@ -1209,7 +1266,7 @@ Alternatives Considered:
 Impact: [Expected effect on outcomes, scope, or risk]
 ```
 
-Seeding requirements from `tasks/OUTCOMES_STATE.md`:
+Seeding requirements from `tasks/{slug}/outcomes/state.md`:
 1. Create initial decision entries for outcome-definition baseline (refined outcomes accepted for execution).
 2. Create decision entries for constraint outcomes:
    - accepted constraints
@@ -1223,17 +1280,17 @@ Seeding requirements from `tasks/OUTCOMES_STATE.md`:
 ### 14.4 Finalize Validation Checklist (Before `finalize` = `complete`)
 
 Before marking phase `complete`, verify all checks:
-1. `tasks/OUTCOMES.md` exists and is non-empty.
-2. `tasks/OUTCOMES.md` contains at least 1 `## Outcome` block with `Success Criteria`.
-3. `tasks/OUTCOMES.md` includes additive sections:
+1. `tasks/{slug}/OUTCOMES.md` exists and is non-empty.
+2. `tasks/{slug}/OUTCOMES.md` contains at least 1 `## Outcome` block with `Success Criteria`.
+3. `tasks/{slug}/OUTCOMES.md` includes additive sections:
    - `## Progress Markers`
    - `## Constraint Hierarchy`
    - `## Anti-Outcomes`
-4. `tasks/PROJECT_STATE.md` exists and is non-empty.
-5. `tasks/PROJECT_STATE.md` includes `Current Sprint` with `Sprint 0 - Setup` and `Status: Ready`.
-6. `tasks/PROJECT_STATE.md` includes `tasks/CONTEXT.md` reference.
-7. `tasks/DECISIONS.md` exists and is non-empty.
-8. `tasks/DECISIONS.md` has decision log header and at least 1 seeded decision entry.
+4. `tasks/{slug}/PROJECT_STATE.md` exists and is non-empty.
+5. `tasks/{slug}/PROJECT_STATE.md` includes `Current Sprint` with `Sprint 0 - Setup` and `Status: Ready`.
+6. `tasks/{slug}/PROJECT_STATE.md` includes `tasks/{slug}/outcomes/context.md` reference.
+7. `tasks/{slug}/DECISIONS.md` exists and is non-empty.
+8. `tasks/{slug}/DECISIONS.md` has decision log header and at least 1 seeded decision entry.
 
 If any check fails:
 - mark `finalize` phase `failed`
@@ -1255,9 +1312,9 @@ On successful validation:
 Finalize Phase Complete
 
 Generated:
-- tasks/OUTCOMES.md
-- tasks/PROJECT_STATE.md
-- tasks/DECISIONS.md
+- tasks/{slug}/OUTCOMES.md
+- tasks/{slug}/PROJECT_STATE.md
+- tasks/{slug}/DECISIONS.md
 
 Validation: PASS
 Next: Artifacts are /orchestrate-ready.
@@ -1273,22 +1330,22 @@ If user confirms `yes`, transition control to `/orchestrate` in the next command
 The `refinement` phase is interactive and runs in the Outcomes Lead context (no separate Task agent).
 
 - Primary outputs:
-  - `tasks/outcomes-refined.md`
-  - `tasks/OUTCOMES_STATE.md`
+  - `tasks/{slug}/outcomes/refined.md`
+  - `tasks/{slug}/outcomes/state.md`
 - Required inputs:
-  - `tasks/outcomes-draft.md`
-  - `tasks/red-team/synthesis.md`
-  - `tasks/CONTEXT.md`
+  - `tasks/{slug}/outcomes/draft.md`
+  - `tasks/{slug}/outcomes/red-team/synthesis.md`
+  - `tasks/{slug}/outcomes/context.md`
 - Resume input (if present):
-  - `tasks/OUTCOMES_STATE.md`
+  - `tasks/{slug}/outcomes/state.md`
 
 ### Refinement Entry and Resume Rules
 
 When `refinement` is selected as the first incomplete phase:
 1. If status is `not_started`, set to `in_progress` and set `started_at` (if empty).
-2. If status is `in_progress`, read `tasks/OUTCOMES_STATE.md` and resume from last unresolved decision point.
-3. If `tasks/OUTCOMES_STATE.md` is missing during resume, reconstruct progress from:
-   - `tasks/outcomes-refined.md` decision log (if present), else
+2. If status is `in_progress`, read `tasks/{slug}/outcomes/state.md` and resume from last unresolved decision point.
+3. If `tasks/{slug}/outcomes/state.md` is missing during resume, reconstruct progress from:
+   - `tasks/{slug}/outcomes/refined.md` decision log (if present), else
    - start refinement from findings presentation.
 4. Persist refinement state after every user response (do not wait for end of phase).
 
@@ -1299,11 +1356,11 @@ When `refinement` is selected as the first incomplete phase:
   - short severity headers
   - one-line decision prompts
   - explicit next action
-- Always persist `tasks/OUTCOMES_STATE.md` after each batch.
+- Always persist `tasks/{slug}/outcomes/state.md` after each batch.
 
 ### Findings Presentation Flow (6.1)
 
-Read `tasks/red-team/synthesis.md` and `tasks/CONTEXT.md`, then present in this order:
+Read `tasks/{slug}/outcomes/red-team/synthesis.md` and `tasks/{slug}/outcomes/context.md`, then present in this order:
 
 1. Executive summary first:
    - format: `Red team found X critical issues. Recommending Y new constraints.`
@@ -1344,7 +1401,7 @@ Mandatory decision rules:
 
 Timestamping and recording:
 - Every decision must record ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`).
-- Persist each decision in `tasks/OUTCOMES_STATE.md` immediately.
+- Persist each decision in `tasks/{slug}/outcomes/state.md` immediately.
 - Include fields:
   - `constraint_id`
   - `decision` (`accepted|modified|rejected`)
@@ -1355,7 +1412,7 @@ Timestamping and recording:
 
 ### Progress Marker Input Flow (6.3)
 
-For each `primary` outcome in `tasks/outcomes-draft.md`, collect:
+For each `primary` outcome in `tasks/{slug}/outcomes/draft.md`, collect:
 - `Expect to See (Minimum Viable)` (required)
 - `Like to See (Target)` (optional)
 - `Love to See (Stretch)` (optional)
@@ -1371,7 +1428,7 @@ Recommended prompt sequence (per primary outcome):
 2. `Like to See` markers
 3. `Love to See` markers
 
-### Required Output Structure (`tasks/outcomes-refined.md`) (6.4)
+### Required Output Structure (`tasks/{slug}/outcomes/refined.md`) (6.4)
 
 ```markdown
 # Outcomes Refined
@@ -1381,9 +1438,9 @@ Recommended prompt sequence (per primary outcome):
 - Started At: [ISO-8601 UTC]
 - Last Updated At: [ISO-8601 UTC]
 - Inputs:
-  - tasks/outcomes-draft.md
-  - tasks/red-team/synthesis.md
-  - tasks/CONTEXT.md
+  - tasks/{slug}/outcomes/draft.md
+  - tasks/{slug}/outcomes/red-team/synthesis.md
+  - tasks/{slug}/outcomes/context.md
 
 ## Executive Summary
 [Refined intent, major risks accepted/mitigated, notable user modifications]
@@ -1450,7 +1507,7 @@ Content requirements:
 4. Include primary-outcome progress markers (`Expect/Like/Love`).
 5. Include rejected-constraint rationale under non-goals.
 
-### Required State Structure (`tasks/OUTCOMES_STATE.md`) (6.5)
+### Required State Structure (`tasks/{slug}/outcomes/state.md`) (6.5)
 
 ```markdown
 # Outcomes State
@@ -1502,8 +1559,8 @@ State requirements:
 ### Timeout/Abandonment and Resume Logic (6.6)
 
 If user abandons refinement mid-flow (timeout, cancel, disconnect, or explicit pause):
-1. Save current decisions immediately to `tasks/OUTCOMES_STATE.md`.
-2. Save partial `tasks/outcomes-refined.md` with marker:
+1. Save current decisions immediately to `tasks/{slug}/outcomes/state.md`.
+2. Save partial `tasks/{slug}/outcomes/refined.md` with marker:
    - `<!-- refinement_status: in_progress -->`
 3. Keep XML phase `refinement` as `in_progress`.
 4. Record resume cursor in state:
@@ -1512,7 +1569,7 @@ If user abandons refinement mid-flow (timeout, cancel, disconnect, or explicit p
    - pending required `Expect to See` markers
 
 On next invocation:
-1. Read `tasks/OUTCOMES_STATE.md`.
+1. Read `tasks/{slug}/outcomes/state.md`.
 2. Display concise resume summary:
    - what is already decided
    - what remains required
@@ -1525,12 +1582,12 @@ On next invocation:
 ### Completion Validation for `refinement` Phase
 
 Before marking `refinement` phase `complete`:
-1. Verify `tasks/outcomes-refined.md` exists and is non-empty.
-2. Verify `tasks/OUTCOMES_STATE.md` exists and is non-empty.
+1. Verify `tasks/{slug}/outcomes/refined.md` exists and is non-empty.
+2. Verify `tasks/{slug}/outcomes/state.md` exists and is non-empty.
 3. Verify every critical/high-linked constraint has explicit decision.
 4. Verify every primary outcome has at least one `Expect to See` marker.
 5. Verify every rejected constraint has recorded rationale.
-6. Verify `tasks/outcomes-refined.md` contains:
+6. Verify `tasks/{slug}/outcomes/refined.md` contains:
    - outcomes from draft
    - constraint decisions
    - anti-outcomes
@@ -1538,7 +1595,7 @@ Before marking `refinement` phase `complete`:
    - user modifications
 
 If validation passes:
-1. set `<!-- refinement_status: complete -->` in `tasks/outcomes-refined.md`
+1. set `<!-- refinement_status: complete -->` in `tasks/{slug}/outcomes/refined.md`
 2. set phase status to `complete` with `completed_at`
 3. write refinement summary to XML (counts of accepted/modified/rejected and markers captured)
 4. persist XML atomically
@@ -1552,24 +1609,24 @@ If validation fails:
 ## 12) Context Phase Agent Contract (Dependencies, Assumptions, Sphere, Prior Art)
 
 The `context` phase produces a project-context artifact for downstream agents:
-- Output: `tasks/CONTEXT.md`
+- Output: `tasks/{slug}/outcomes/context.md`
 - Purpose: document internal/external dependencies, assumptions with risk, sphere of influence, and prior art/pattern guidance.
 
 ### Context Inputs and Read Order
 
 Read these inputs in order:
-1. `tasks/outcomes-draft.md`
-2. `tasks/red-team/synthesis.md`
+1. `tasks/{slug}/outcomes/draft.md`
+2. `tasks/{slug}/outcomes/red-team/synthesis.md`
 3. `.ai/FILES.json`
 4. `.ai/ARCHITECTURE.json`
 5. `.ai/PATTERNS.md`
 6. `.ai/BUSINESS.json`
 
 Input handling rules:
-1. `tasks/outcomes-draft.md` is required.
-2. `tasks/red-team/synthesis.md` is strongly preferred; if missing, continue with explicit warning.
+1. `tasks/{slug}/outcomes/draft.md` is required.
+2. `tasks/{slug}/outcomes/red-team/synthesis.md` is strongly preferred; if missing, continue with explicit warning.
 3. Missing `.ai/*` files do not block phase completion if at least 2 memory files are available.
-4. Every missing input must be listed in `tasks/CONTEXT.md` under `Input Coverage`.
+4. Every missing input must be listed in `tasks/{slug}/outcomes/context.md` under `Input Coverage`.
 
 ### Explore Analysis Pattern (Mandatory)
 
@@ -1579,7 +1636,7 @@ Use the Explore-agent workflow pattern from `~/.claude/commands/investigate.md:1
 3. Produce concrete, file-referenced findings (path references required).
 4. Keep output decision-oriented for downstream refinement/finalize phases.
 
-### Required Output Structure (`tasks/CONTEXT.md`)
+### Required Output Structure (`tasks/{slug}/outcomes/context.md`)
 
 ```markdown
 # Context Capture
@@ -1663,7 +1720,7 @@ Minimum coverage:
 4. Conditional degraded-mode minima when memory inputs are unavailable:
    - similar features >= 0 (instead of 2)
    - applicable patterns >= 0 (instead of 3)
-5. When degraded minima are used, `tasks/CONTEXT.md` must explicitly annotate degraded context mode in `Input Coverage` and the `Prior Art` section.
+5. When degraded minima are used, `tasks/{slug}/outcomes/context.md` must explicitly annotate degraded context mode in `Input Coverage` and the `Prior Art` section.
 
 ### Context Task Prompt Contract
 
@@ -1674,15 +1731,15 @@ Task(
   Phase: context
 
   Read inputs (in order):
-  - tasks/outcomes-draft.md
-  - tasks/red-team/synthesis.md
+  - tasks/{slug}/outcomes/draft.md
+  - tasks/{slug}/outcomes/red-team/synthesis.md
   - .ai/FILES.json
   - .ai/ARCHITECTURE.json
   - .ai/PATTERNS.md
   - .ai/BUSINESS.json
 
   Goal:
-  - Produce tasks/CONTEXT.md with: Dependencies, Assumptions, Sphere of Influence, Prior Art.
+  - Produce tasks/{slug}/outcomes/context.md with: Dependencies, Assumptions, Sphere of Influence, Prior Art.
   - Use concrete file references and explicit risk language.
   - If inputs are missing, continue with available files and include Input Coverage section.
 
@@ -1693,7 +1750,7 @@ Task(
   - Prior art and applicable patterns with practical reuse guidance.
 
   Write output to:
-  - tasks/CONTEXT.md
+  - tasks/{slug}/outcomes/context.md
   """
 )
 ```
@@ -1701,7 +1758,7 @@ Task(
 ### Completion Validation for `context` Phase
 
 Before marking `context` phase `complete`:
-1. Verify `tasks/CONTEXT.md` exists.
+1. Verify `tasks/{slug}/outcomes/context.md` exists.
 2. Verify file is non-empty.
 3. Verify required sections are present:
    - `Input Coverage`
