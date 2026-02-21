@@ -56,6 +56,8 @@ STUCK_THRESHOLD = 3           # same sprint name N times in sequence -> halt
 PM_ERROR_MAX_RETRIES = 1
 SIGNAL_PARSE_MAX_RETRIES = 1
 PARALLEL_LAUNCH_DELAY = 2.0   # seconds between parallel PL launches
+PROJECT_SLUG_MAX_LENGTH = 64
+PROJECT_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +172,7 @@ def _log_agent_io(
 def _capture_session_logs(
     sprint: Dict[str, Any],
     project_dir: Path,
+    project_slug: str,
     cycle: int,
 ) -> None:
     """Copy pl-session.log and execution.log from sprint task dir to agent-logs/.
@@ -182,7 +185,7 @@ def _capture_session_logs(
         return
 
     sprint_name = sprint.get("name", "unknown")
-    task_dir = project_dir / "tasks" / sprint_name
+    task_dir = project_dir / "tasks" / project_slug / sprint_name
 
     for log_name in ("pl-session.log", "execution.log"):
         src = task_dir / log_name
@@ -223,6 +226,7 @@ class SprintTask:
 class OrchestratorState:
     """Top-level orchestrator state."""
     project_dir: Path
+    project_slug: str = field(default="", kw_only=True)
     roadmap_path: Path
     outcomes_path: Path
     log_dir: Path
@@ -969,6 +973,7 @@ class NodeHandler:
         context: str,
         config: ModelConfig,
         project_dir: Path,
+        project_slug: str = "",
         cycle: int = 0,
     ) -> NodeOutcome:
         raise NotImplementedError(f"{self.__class__.__name__} must implement execute()")
@@ -1039,6 +1044,7 @@ class SoftwareHandler(NodeHandler):
         context: str,
         config: ModelConfig,
         project_dir: Path,
+        project_slug: str = "",
         cycle: int = 0,
     ) -> NodeOutcome:
         started_at = time.monotonic()
@@ -1086,7 +1092,7 @@ class SoftwareHandler(NodeHandler):
                 "prd": prd_path,
                 "branch": branch,
             }
-            pl_context = build_pl_context(sprint_payload, worktree_path)
+            pl_context = build_pl_context(sprint_payload, worktree_path, project_slug)
             if node.criteria:
                 pl_context += (
                     "\n\nQUALITY_CRITERIA:\n"
@@ -1255,15 +1261,16 @@ class ContentHandler(NodeHandler):
         context: str,
         config: ModelConfig,
         project_dir: Path,
+        project_slug: str = "",
         cycle: int = 0,
     ) -> NodeOutcome:
         started_at = time.monotonic()
         model_used = f"{config.provider}:{config.model}"
-        work_dir = project_dir / "tasks" / node.id
+        work_dir = _project_tasks_dir(project_dir, project_slug) / node.id
         work_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            content_context = self._build_content_context(node, context)
+            content_context = self._build_content_context(node, context, project_slug)
             output = invoke_agent(
                 "pl",
                 content_context,
@@ -1316,12 +1323,20 @@ class ContentHandler(NodeHandler):
             merge_details=None,
         )
 
-    def _build_content_context(self, node: GraphNode, upstream_context: str) -> str:
+    def _build_content_context(
+        self,
+        node: GraphNode,
+        upstream_context: str,
+        project_slug: str = "",
+    ) -> str:
         """Build content-focused context for document/report generation nodes."""
+        working_dir = (
+            f"tasks/{project_slug}/{node.id}" if project_slug else f"tasks/{node.id}"
+        )
         output_path = (
             node.output_path
             or str(node.inputs.get("output_path", "")).strip()
-            or f"tasks/{node.id}/output.md"
+            or f"{working_dir}/output.md"
         )
         topic = str(node.inputs.get("topic", node.name or node.id)).strip()
         style_guide = (
@@ -1336,7 +1351,7 @@ class ContentHandler(NodeHandler):
             f"TASK_NAME: {node.name or node.id}",
             f"TOPIC: {topic}",
             f"OUTPUT_PATH: {output_path}",
-            f"WORKING_DIRECTORY: tasks/{node.id}",
+            f"WORKING_DIRECTORY: {working_dir}",
         ]
         if node.source_materials:
             parts.append(
@@ -1412,11 +1427,12 @@ class DiscoveryHandler(NodeHandler):
         context: str,
         config: ModelConfig,
         project_dir: Path,
+        project_slug: str = "",
         cycle: int = 0,
     ) -> NodeOutcome:
         started_at = time.monotonic()
         model_used = f"{config.provider}:{config.model}"
-        work_dir = project_dir / "tasks" / node.id
+        work_dir = _project_tasks_dir(project_dir, project_slug) / node.id
         work_dir.mkdir(parents=True, exist_ok=True)
         context_path = work_dir / "CONTEXT.md"
 
@@ -1439,9 +1455,9 @@ class DiscoveryHandler(NodeHandler):
             )
 
         if complexity == "simple":
-            discovery_context = self._build_simple_discovery_context(node)
+            discovery_context = self._build_simple_discovery_context(node, project_slug)
         else:
-            discovery_context = self._build_complex_discovery_context(node)
+            discovery_context = self._build_complex_discovery_context(node, project_slug)
         if context:
             discovery_context += f"\n\nUPSTREAM_CONTEXT:\n{context}"
 
@@ -1583,9 +1599,18 @@ class DiscoveryHandler(NodeHandler):
         )
         return "complex"
 
-    def _build_simple_discovery_context(self, node: GraphNode) -> str:
+    def _build_simple_discovery_context(
+        self,
+        node: GraphNode,
+        project_slug: str = "",
+    ) -> str:
         """Build a compact discovery prompt for straightforward outcomes."""
         constraints = self._extract_constraints(node)
+        output_file = (
+            f"tasks/{project_slug}/{{node-id}}/CONTEXT.md"
+            if project_slug
+            else "tasks/{node-id}/CONTEXT.md"
+        )
         lines = [
             "DISCOVERY_MODE: simple",
             "TOKEN_BUDGET: ~2000",
@@ -1596,16 +1621,25 @@ class DiscoveryHandler(NodeHandler):
             "- ## Approach",
             "- ## Rationale",
             "- ## Constraints",
-            "OUTPUT_FILE: tasks/{node-id}/CONTEXT.md",
+            f"OUTPUT_FILE: {output_file}",
             "Also emit ORCHESTRATOR_SIGNAL with signal=done, summary, context_path, complexity_used.",
         ]
         if constraints:
             lines.append("CONSTRAINTS:\n" + "\n".join(f"- {item}" for item in constraints))
         return "\n".join(lines)
 
-    def _build_complex_discovery_context(self, node: GraphNode) -> str:
+    def _build_complex_discovery_context(
+        self,
+        node: GraphNode,
+        project_slug: str = "",
+    ) -> str:
         """Build a deep-investigation discovery prompt for ambiguous outcomes."""
         constraints = self._extract_constraints(node)
+        output_file = (
+            f"tasks/{project_slug}/{{node-id}}/CONTEXT.md"
+            if project_slug
+            else "tasks/{node-id}/CONTEXT.md"
+        )
         lines = [
             "DISCOVERY_MODE: complex",
             f"OUTCOME_NAME: {node.name or node.id}",
@@ -1621,7 +1655,7 @@ class DiscoveryHandler(NodeHandler):
             "- ## Constraints",
             "- ## Investigation Findings",
             "- ## Alternatives Considered",
-            "OUTPUT_FILE: tasks/{node-id}/CONTEXT.md",
+            f"OUTPUT_FILE: {output_file}",
             "Also emit ORCHESTRATOR_SIGNAL with signal=done, summary, context_path, complexity_used.",
         ]
         if node.discovery_tools:
@@ -4009,10 +4043,17 @@ def _format_pl_result(pr: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def build_pl_context(sprint: Dict[str, Any], project_dir: Path) -> str:
+def build_pl_context(
+    sprint: Dict[str, Any],
+    project_dir: Path,
+    project_slug: str = "",
+) -> str:
     """Build the context string passed to the PL agent for a sprint."""
+    prd_path = _normalize_task_relative_path(str(sprint["prd"]), project_slug)
+    prd_absolute = prd_path if prd_path.is_absolute() else project_dir / prd_path
+
     return (
-        f"SPRINT_PRD: {project_dir / sprint['prd']}\n"
+        f"SPRINT_PRD: {prd_absolute}\n"
         f"BRANCH: {sprint['branch']}\n"
         f"SPRINT_NAME: {sprint['name']}\n"
         f"PROJECT_DIR: {project_dir}"
@@ -4164,6 +4205,7 @@ def execute_sprints(
             context="",
             config=config,
             project_dir=state.project_dir,
+            project_slug=state.project_slug,
             cycle=state.cycle_count,
         )
         result = _node_outcome_to_result(node, outcome)
@@ -4173,7 +4215,12 @@ def execute_sprints(
             sprint_name,
             result.get("signal", {}).get("signal", "unknown"),
         )
-        _capture_session_logs(result.get("sprint", {}), state.project_dir, state.cycle_count)
+        _capture_session_logs(
+            result.get("sprint", {}),
+            state.project_dir,
+            state.project_slug,
+            state.cycle_count,
+        )
 
     checkout_main(state.project_dir)
     return results
@@ -4414,6 +4461,7 @@ def _resolve_discovery_context_artifact(
     upstream_id: str,
     checkpoint_manager: "CheckpointManager",
     project_dir: Path,
+    project_slug: str = "",
 ) -> Optional[Tuple[str, Path]]:
     """Resolve discovery CONTEXT.md artifact path for an upstream node."""
     artifact_paths = checkpoint_manager.get_artifacts(upstream_id)
@@ -4427,7 +4475,10 @@ def _resolve_discovery_context_artifact(
             candidates.append(artifact_text)
 
     if not candidates:
-        candidates.append(f"tasks/{upstream_id}/CONTEXT.md")
+        if project_slug:
+            candidates.append(f"tasks/{project_slug}/{upstream_id}/CONTEXT.md")
+        else:
+            candidates.append(f"tasks/{upstream_id}/CONTEXT.md")
 
     for candidate in candidates:
         path = Path(candidate)
@@ -4483,6 +4534,7 @@ def build_node_context(
     graph: Graph,
     checkpoint_mgr: "CheckpointManager",
     project_dir: Path,
+    project_slug: str = "",
     fidelity: ContextFidelityMode = ContextFidelityMode.MINIMAL,
 ) -> str:
     """Build node context with minimal, partial, and full fidelity modes."""
@@ -4509,7 +4561,7 @@ def build_node_context(
         "source_materials": list(node.source_materials),
     }
 
-    outcomes_path = project_dir / "tasks" / "OUTCOMES.md"
+    outcomes_path = _project_tasks_dir(project_dir, project_slug) / "OUTCOMES.md"
     outcomes_summary = "Unavailable"
     if outcomes_path.is_file():
         try:
@@ -4565,6 +4617,7 @@ def build_node_context(
                 upstream_id,
                 checkpoint_mgr,
                 project_dir,
+                project_slug,
             )
             if resolved is None:
                 continue
@@ -4641,6 +4694,7 @@ def build_node_context(
             graph=graph,
             checkpoint_mgr=checkpoint_mgr,
             project_dir=project_dir,
+            project_slug=project_slug,
             fidelity=ContextFidelityMode.PARTIAL,
         )
 
@@ -4658,6 +4712,7 @@ def _build_node_context(
     graph_engine: GraphEngine,
     checkpoint_manager: "CheckpointManager",
     project_dir: Path,
+    project_slug: str = "",
 ) -> str:
     """Backward-compatible wrapper around public build_node_context()."""
     return build_node_context(
@@ -4665,6 +4720,7 @@ def _build_node_context(
         graph=graph_engine.graph,
         checkpoint_mgr=checkpoint_manager,
         project_dir=project_dir,
+        project_slug=project_slug,
         fidelity=_coerce_enum(
             ContextFidelityMode,
             node.context_fidelity,
@@ -5111,7 +5167,7 @@ def run_orchestration(state: OrchestratorState) -> int:
             # Reset error retry counter on successful PM planning.
             pm_error_retries = 0
 
-            tasks_dir = state.project_dir / "tasks"
+            tasks_dir = state.log_dir
             expected_graph_hash = _compute_graph_hash(graph)
             resume_run_dir = _find_resumable_run_dir(tasks_dir, expected_graph_hash)
 
@@ -5291,6 +5347,7 @@ def run_orchestration(state: OrchestratorState) -> int:
                         graph_engine,
                         checkpoint_manager,
                         state.project_dir,
+                        state.project_slug,
                     )
                     logger.info(
                         "Executing graph node '%s' (%s via %s)",
@@ -5304,6 +5361,7 @@ def run_orchestration(state: OrchestratorState) -> int:
                         context=node_context,
                         config=model_config,
                         project_dir=state.project_dir,
+                        project_slug=state.project_slug,
                         cycle=state.cycle_count,
                     )
                     result = _node_outcome_to_result(node, outcome)
@@ -5382,6 +5440,7 @@ def run_orchestration(state: OrchestratorState) -> int:
                     _capture_session_logs(
                         result.get("sprint", {}),
                         state.project_dir,
+                        state.project_slug,
                         state.cycle_count,
                     )
 
@@ -5597,7 +5656,7 @@ def _run_graph_validation_mode(project_dir: Path, graph_file: Path) -> int:
     return 1
 
 
-def _run_invalidate_nodes_mode(project_dir: Path, node_ids_csv: str) -> int:
+def _run_invalidate_nodes_mode(tasks_dir: Path, node_ids_csv: str) -> int:
     """Invalidate selected nodes (plus downstream cascade) in latest run checkpoint."""
     requested_node_ids: List[str] = []
     for raw_id in str(node_ids_csv or "").split(","):
@@ -5609,7 +5668,6 @@ def _run_invalidate_nodes_mode(project_dir: Path, node_ids_csv: str) -> int:
         print("Invalidate failed: no node IDs provided", file=sys.stderr)
         return 1
 
-    tasks_dir = project_dir / "tasks"
     latest_run = _find_latest_run_dir(tasks_dir)
     if latest_run is None:
         print(
@@ -5646,6 +5704,64 @@ def _run_invalidate_nodes_mode(project_dir: Path, node_ids_csv: str) -> int:
     return 0
 
 
+def _is_valid_project_slug(slug: str) -> bool:
+    """Validate a project slug from CLI or directory detection."""
+    return (
+        bool(slug)
+        and len(slug) <= PROJECT_SLUG_MAX_LENGTH
+        and PROJECT_SLUG_PATTERN.fullmatch(slug) is not None
+    )
+
+
+def _discover_projects(project_dir: Path) -> List[str]:
+    """Return slugs for project-scoped OUTCOMES.md files under tasks/."""
+    tasks_dir = project_dir / "tasks"
+    if not tasks_dir.is_dir():
+        return []
+
+    slugs: List[str] = []
+    for outcomes_path in sorted(tasks_dir.glob("*/OUTCOMES.md")):
+        if not outcomes_path.is_file():
+            continue
+
+        slug = outcomes_path.parent.name
+        if slug == "archive":
+            continue
+        if not _is_valid_project_slug(slug):
+            logger.warning(
+                "Skipping invalid project directory '%s' while auto-detecting project slug",
+                slug,
+            )
+            continue
+
+        slugs.append(slug)
+
+    return slugs
+
+
+def _project_tasks_dir(project_dir: Path, project_slug: str = "") -> Path:
+    """Return tasks directory, scoped to project slug when provided."""
+    tasks_dir = project_dir / "tasks"
+    if project_slug:
+        return tasks_dir / project_slug
+    return tasks_dir
+
+
+def _normalize_task_relative_path(path_text: str, project_slug: str) -> Path:
+    """Insert project slug into legacy tasks/* relative paths when needed."""
+    raw_path = Path(path_text)
+    if raw_path.is_absolute() or not project_slug:
+        return raw_path
+
+    parts = raw_path.parts
+    if not parts or parts[0] != "tasks":
+        return raw_path
+    if len(parts) >= 2 and parts[1] in {project_slug, "archive"}:
+        return raw_path
+
+    return Path("tasks") / project_slug / Path(*parts[1:])
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -5664,7 +5780,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "project_dir",
         type=Path,
-        help="Path to the project directory (must contain tasks/OUTCOMES.md)",
+        help="Path to the project directory (must contain tasks/<project-slug>/OUTCOMES.md)",
     )
     parser.add_argument(
         "--max-cycles",
@@ -5695,6 +5811,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         default=False,
         help="Skip interactive VALUES.md prompts (use when launched from /orchestrate command)",
+    )
+    parser.add_argument(
+        "--project",
+        type=str,
+        required=False,
+        help="Project slug (e.g., 'coach-ops-auth'). Auto-detected if only one project exists.",
     )
     parser.add_argument(
         "--validate-graph",
@@ -5728,24 +5850,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"Error: '{project_dir}' is not a directory", file=sys.stderr)
         return 1
 
-    # Initialize state
-    state = OrchestratorState(
-        project_dir=project_dir,
-        roadmap_path=project_dir / "tasks" / "ROADMAP.md",
-        outcomes_path=project_dir / "tasks" / "OUTCOMES.md",
-        log_dir=project_dir / "tasks",
-        max_cycles=args.max_cycles,
-        pm_timeout=args.pm_timeout,
-        pl_timeout=args.pl_timeout,
-    )
-
-    # Setup logging
-    setup_logging(state.log_dir, args.log_level)
-    logger.info(
-        "Orchestrator starting: project=%s, max_cycles=%d, pm_timeout=%d, pl_timeout=%d",
-        project_dir, state.max_cycles, state.pm_timeout, state.pl_timeout,
-    )
-
     if args.validate_graph is not None and args.invalidate_nodes:
         print(
             "Error: --validate-graph and --invalidate-nodes cannot be used together",
@@ -5756,8 +5860,71 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.validate_graph is not None:
         return _run_graph_validation_mode(project_dir, args.validate_graph)
 
+    auto_detected_project = False
+    if args.project:
+        project_slug = str(args.project).strip()
+        if not _is_valid_project_slug(project_slug):
+            print(
+                "Error: Invalid --project slug. "
+                f"Expected ^[a-z0-9]+(-[a-z0-9]+)*$ and max {PROJECT_SLUG_MAX_LENGTH} characters.",
+                file=sys.stderr,
+            )
+            return 1
+
+        explicit_outcomes_path = project_dir / "tasks" / project_slug / "OUTCOMES.md"
+        if not explicit_outcomes_path.is_file():
+            print(
+                "Error: OUTCOMES.md not found at "
+                f"tasks/{project_slug}/OUTCOMES.md. Run /outcomes first.",
+                file=sys.stderr,
+            )
+            return 1
+    else:
+        slugs = _discover_projects(project_dir)
+        if not slugs:
+            print(
+                "Error: No projects found. Run /outcomes first to define project outcomes.",
+                file=sys.stderr,
+            )
+            return 1
+        if len(slugs) > 1:
+            print(
+                "Error: Multiple projects found. Specify which with --project: "
+                + ", ".join(slugs),
+                file=sys.stderr,
+            )
+            return 1
+
+        project_slug = slugs[0]
+        auto_detected_project = True
+
+    # Initialize state
+    state = OrchestratorState(
+        project_dir=project_dir,
+        project_slug=project_slug,
+        roadmap_path=project_dir / "tasks" / project_slug / "ROADMAP.md",
+        outcomes_path=project_dir / "tasks" / project_slug / "OUTCOMES.md",
+        log_dir=project_dir / "tasks" / project_slug,
+        max_cycles=args.max_cycles,
+        pm_timeout=args.pm_timeout,
+        pl_timeout=args.pl_timeout,
+    )
+
+    # Setup logging
+    setup_logging(state.log_dir, args.log_level)
+    if auto_detected_project:
+        logger.info("Auto-detected project: %s", state.project_slug)
+    logger.info(
+        "Orchestrator starting: project=%s, slug=%s, max_cycles=%d, pm_timeout=%d, pl_timeout=%d",
+        project_dir,
+        state.project_slug,
+        state.max_cycles,
+        state.pm_timeout,
+        state.pl_timeout,
+    )
+
     if args.invalidate_nodes:
-        return _run_invalidate_nodes_mode(project_dir, args.invalidate_nodes)
+        return _run_invalidate_nodes_mode(state.log_dir, args.invalidate_nodes)
 
     # --- Pre-flight checks ---
 
