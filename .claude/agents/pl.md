@@ -91,9 +91,13 @@ If memory files are missing, continue without them -- they are helpful but not r
 
 Log phase transitions to a flat file for post-hoc diagnosis of PL session progress.
 
+### Path Derivation Rule
+
+All file paths derive from `SPRINT_PRD`. Never hardcode `tasks/{SPRINT_NAME}/`.
+
 ### Log File
 
-`tasks/{SPRINT_NAME}/pl-session.log`
+`$(dirname "$SPRINT_PRD")/pl-session.log`
 
 Create this file at session start, before the boot sequence begins.
 
@@ -108,7 +112,8 @@ Create this file at session start, before the boot sequence begins.
 Use Bash `echo` append at each phase transition:
 
 ```bash
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] PHASE=phase-name KEY=value" >> tasks/{SPRINT_NAME}/pl-session.log
+SPRINT_DIR="$(dirname "$SPRINT_PRD")"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] PHASE=phase-name KEY=value" >> "$SPRINT_DIR/pl-session.log"
 ```
 
 ### Required Phase Events
@@ -140,7 +145,7 @@ After boot completes successfully, execute the sprint in strict order.
 Invoke `/TaskGen` with the sprint PRD to generate implementation tasks.
 
 - **Input**: The sprint PRD path (from `SPRINT_PRD`)
-- **Expected output**: `tasks/{sprint-name}/task.xml` (or the path returned by TaskGen)
+- **Expected output**: `$(dirname "$SPRINT_PRD")/task.xml` (or the path returned by TaskGen)
 - **If TaskGen fails**: Retry once. If still failing, signal `error` with failure details.
 - **If task.xml already exists** for this sprint: Skip TaskGen and use the existing task file. Log that you are reusing existing tasks.
 
@@ -296,7 +301,7 @@ Valid `error_type` values: `prd_not_found`, `prd_invalid`, `branch_mismatch`, `b
 
 2. TASKGEN
    - Invoke /TaskGen with PRD path
-   - Output: tasks/sprint-1-auth/task.xml (5 parent tasks, 14 subtasks)
+   - Output: /projects/myapp/tasks/sprint-1-auth/task.xml (5 parent tasks, 14 subtasks)
 
 3. EXECUTE
    - Invoke /execute sprint-1-auth
