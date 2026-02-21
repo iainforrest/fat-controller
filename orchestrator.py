@@ -20,6 +20,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import logging
 import os
 import re
@@ -644,6 +646,420 @@ class GraphEngine:
         if operator == "<=":
             return actual_num <= expected_num
         raise ValueError(f"Unsupported operator '{operator}'")
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint manager
+# ---------------------------------------------------------------------------
+
+class CheckpointManager:
+    """Persist and recover per-node graph execution state."""
+
+    def __init__(self, run_dir: str, graph: Graph):
+        self.logger = logging.getLogger("orchestrator")
+        self.run_dir = Path(run_dir)
+        self.graph = graph
+        self.graph_engine = GraphEngine(graph)
+        self.checkpoint_path = self.run_dir / "checkpoint.json"
+        self.temp_checkpoint_path = self.run_dir / "checkpoint.json.tmp"
+        self.graph_hash = self._compute_graph_hash(graph)
+
+        generated_run_id = self._generate_run_id()
+        existing_state = self._load_checkpoint()
+
+        if existing_state is None:
+            self.state = self._new_checkpoint_state(generated_run_id)
+            self.run_id = self.state.run_id
+            return
+
+        if existing_state.graph_hash != self.graph_hash:
+            self.logger.warning(
+                "Pipeline definition changed since last run (hash mismatch). Starting fresh."
+            )
+            self.state = self._new_checkpoint_state(generated_run_id)
+            self.run_id = self.state.run_id
+            return
+
+        self.state = existing_state
+        self.run_id = self.state.run_id or generated_run_id
+
+        changed = False
+        if self.state.run_id != self.run_id:
+            self.state.run_id = self.run_id
+            changed = True
+
+        if self.state.graph_hash != self.graph_hash:
+            self.state.graph_hash = self.graph_hash
+            changed = True
+
+        # Ensure every graph node has checkpoint state on resume.
+        for node_id in self.graph.nodes:
+            if node_id not in self.state.nodes:
+                self.state.nodes[node_id] = NodeCheckpoint(
+                    status=NodeStatus.PENDING.value
+                )
+                changed = True
+
+        # in_progress indicates the process likely crashed mid-node.
+        for node_id, checkpoint in self.state.nodes.items():
+            status = self._normalize_status(checkpoint.status)
+            checkpoint.status = status
+            if status != NodeStatus.IN_PROGRESS.value:
+                continue
+
+            self.logger.warning(
+                "Resetting in_progress node '%s' to pending (crashed mid-execution)",
+                node_id,
+            )
+            self._reset_node_checkpoint(checkpoint)
+            changed = True
+
+        # Missing summaries are a quality signal only; keep completed status.
+        for node_id, checkpoint in self.state.nodes.items():
+            if self._normalize_status(checkpoint.status) != NodeStatus.COMPLETED.value:
+                continue
+            summary = checkpoint.output_summary or ""
+            if summary.strip():
+                continue
+            self.logger.warning(
+                "Completed node '%s' has missing output_summary in checkpoint; keeping completed status",
+                node_id,
+            )
+
+        if changed:
+            self._write_checkpoint()
+
+    def _compute_graph_hash(self, graph: Graph) -> str:
+        """Compute deterministic SHA256 hash for graph structure."""
+        canonical_nodes = []
+        for node_id in sorted(graph.nodes):
+            node = graph.nodes[node_id]
+            canonical_nodes.append(
+                {
+                    "id": node.id,
+                    "name": node.name,
+                    "type": self._enum_or_value(node.type),
+                    "node_class": node.node_class,
+                    "handler": node.handler,
+                    "inputs": node.inputs,
+                    "context_fidelity": self._enum_or_value(node.context_fidelity),
+                    "complexity_hint": node.complexity_hint,
+                    "discovery_tools": node.discovery_tools,
+                    "criteria": node.criteria,
+                    "retry_target": node.retry_target,
+                    "max_retries": node.max_retries,
+                    "prd_path": node.prd_path,
+                    "branch": node.branch,
+                    "output_path": node.output_path,
+                    "source_materials": node.source_materials,
+                }
+            )
+
+        canonical_edges = []
+        for edge in sorted(
+            graph.edges,
+            key=lambda item: (item.source, item.target, item.condition or "always"),
+        ):
+            canonical_edges.append(
+                {
+                    "source": edge.source,
+                    "target": edge.target,
+                    "condition": edge.condition or "always",
+                }
+            )
+
+        canonical_graph = {
+            "domain": self._enum_or_value(graph.domain),
+            "nodes": canonical_nodes,
+            "edges": canonical_edges,
+        }
+        canonical_str = json.dumps(
+            canonical_graph,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
+        return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
+
+    def _write_checkpoint(self) -> None:
+        """Write checkpoint state atomically using write-then-rename."""
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        self.state.updated_at = self._utc_timestamp()
+
+        payload = {
+            "run_id": self.state.run_id,
+            "graph_hash": self.state.graph_hash,
+            "nodes": {},
+            "created_at": self.state.created_at,
+            "updated_at": self.state.updated_at,
+            "gate_retries": self.state.gate_retries,
+        }
+        for node_id in sorted(self.state.nodes):
+            node_state = self.state.nodes[node_id]
+            payload["nodes"][node_id] = {
+                "status": self._normalize_status(node_state.status),
+                "started_at": node_state.started_at,
+                "completed_at": node_state.completed_at,
+                "output_summary": node_state.output_summary,
+                "model_used": node_state.model_used,
+                "artifacts": list(node_state.artifacts),
+                "error_details": node_state.error_details,
+            }
+
+        with self.temp_checkpoint_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        os.rename(self.temp_checkpoint_path, self.checkpoint_path)
+
+        completed = sum(
+            1
+            for node in self.state.nodes.values()
+            if self._normalize_status(node.status) == NodeStatus.COMPLETED.value
+        )
+        total = len(self.state.nodes)
+        self.logger.info("Checkpoint written: %d/%d nodes complete", completed, total)
+
+    def record_node_completion(self, node_id: str, outcome: NodeOutcome) -> None:
+        """Record node completion data and persist checkpoint immediately."""
+        node_checkpoint = self._ensure_node_checkpoint(node_id)
+        node_checkpoint.status = self._normalize_status(outcome.status)
+        node_checkpoint.completed_at = self._utc_timestamp()
+        summary = str(outcome.output_summary or "")
+        node_checkpoint.output_summary = summary[:2000]
+        node_checkpoint.model_used = str(outcome.model_used or "")
+        node_checkpoint.artifacts = list(outcome.artifacts or [])
+        node_checkpoint.error_details = (
+            None if outcome.error_details is None else str(outcome.error_details)
+        )
+        self._write_checkpoint()
+
+    def record_node_start(self, node_id: str, model: str) -> None:
+        """Record node start and selected model, then persist checkpoint."""
+        node_checkpoint = self._ensure_node_checkpoint(node_id)
+        node_checkpoint.status = NodeStatus.IN_PROGRESS.value
+        node_checkpoint.started_at = self._utc_timestamp()
+        node_checkpoint.completed_at = None
+        node_checkpoint.model_used = str(model or "")
+        node_checkpoint.output_summary = None
+        node_checkpoint.artifacts = []
+        node_checkpoint.error_details = None
+        self._write_checkpoint()
+
+    def get_status_map(self) -> Dict[str, str]:
+        """Return node status map from current checkpoint state."""
+        return {
+            node_id: self._normalize_status(node_state.status)
+            for node_id, node_state in self.state.nodes.items()
+        }
+
+    def get_output_summary(self, node_id: str) -> Optional[str]:
+        """Return node output summary from checkpoint if present."""
+        node_state = self.state.nodes.get(node_id)
+        if node_state is None:
+            return None
+        return node_state.output_summary
+
+    def invalidate_nodes(self, node_ids: List[str]) -> None:
+        """Reset selected nodes and all downstream nodes to pending."""
+        to_reset: Set[str] = set()
+        queue: deque[str] = deque(node_ids)
+
+        while queue:
+            node_id = queue.popleft()
+            if node_id in to_reset:
+                continue
+            if node_id not in self.graph.nodes:
+                self.logger.warning(
+                    "Cannot invalidate unknown node '%s'; skipping",
+                    node_id,
+                )
+                continue
+
+            to_reset.add(node_id)
+            for downstream_id in self.graph_engine.get_downstream_nodes(node_id):
+                if downstream_id not in to_reset:
+                    queue.append(downstream_id)
+
+        if not to_reset:
+            return
+
+        for node_id in sorted(to_reset):
+            node_checkpoint = self._ensure_node_checkpoint(node_id)
+            self._reset_node_checkpoint(node_checkpoint)
+            self.logger.info("Invalidated node '%s' (reset to pending)", node_id)
+
+        self._write_checkpoint()
+
+    def _load_checkpoint(self) -> Optional[CheckpointState]:
+        """Load checkpoint.json from disk if present and parse safely."""
+        if not self.checkpoint_path.exists():
+            return None
+
+        try:
+            with self.checkpoint_path.open("r", encoding="utf-8") as handle:
+                raw_data = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            self.logger.warning(
+                "Failed to load checkpoint '%s': %s. Starting fresh.",
+                self.checkpoint_path,
+                exc,
+            )
+            return None
+
+        if not isinstance(raw_data, dict):
+            self.logger.warning(
+                "Checkpoint '%s' is not a JSON object. Starting fresh.",
+                self.checkpoint_path,
+            )
+            return None
+
+        nodes_raw = raw_data.get("nodes", {})
+        if not isinstance(nodes_raw, dict):
+            self.logger.warning(
+                "Checkpoint '%s' has invalid 'nodes' payload. Starting fresh.",
+                self.checkpoint_path,
+            )
+            return None
+
+        parsed_nodes: Dict[str, NodeCheckpoint] = {}
+        for node_id, node_data in nodes_raw.items():
+            if not isinstance(node_data, dict):
+                self.logger.warning(
+                    "Checkpoint node '%s' payload is invalid; resetting to pending",
+                    node_id,
+                )
+                parsed_nodes[str(node_id)] = NodeCheckpoint(
+                    status=NodeStatus.PENDING.value
+                )
+                continue
+
+            artifacts_raw = node_data.get("artifacts", [])
+            if isinstance(artifacts_raw, list):
+                artifacts = [str(item) for item in artifacts_raw if item is not None]
+            else:
+                self.logger.warning(
+                    "Checkpoint node '%s' has non-list artifacts; defaulting to empty list",
+                    node_id,
+                )
+                artifacts = []
+
+            parsed_nodes[str(node_id)] = NodeCheckpoint(
+                status=self._normalize_status(
+                    node_data.get("status", NodeStatus.PENDING.value)
+                ),
+                started_at=self._optional_text(node_data.get("started_at")),
+                completed_at=self._optional_text(node_data.get("completed_at")),
+                output_summary=self._optional_text(node_data.get("output_summary")),
+                model_used=self._optional_text(node_data.get("model_used")),
+                artifacts=artifacts,
+                error_details=self._optional_text(node_data.get("error_details")),
+            )
+
+        gate_retries_raw = raw_data.get("gate_retries", {})
+        gate_retries: Dict[str, int] = {}
+        if isinstance(gate_retries_raw, dict):
+            for node_id, retries in gate_retries_raw.items():
+                try:
+                    gate_retries[str(node_id)] = int(retries)
+                except (TypeError, ValueError):
+                    self.logger.warning(
+                        "Checkpoint gate_retries for node '%s' is invalid (%r); defaulting to 0",
+                        node_id,
+                        retries,
+                    )
+                    gate_retries[str(node_id)] = 0
+        else:
+            self.logger.warning(
+                "Checkpoint has invalid gate_retries payload; defaulting to empty dict"
+            )
+
+        created_at = self._optional_text(raw_data.get("created_at"))
+        updated_at = self._optional_text(raw_data.get("updated_at"))
+
+        return CheckpointState(
+            run_id=self._optional_text(raw_data.get("run_id")) or self._generate_run_id(),
+            graph_hash=self._optional_text(raw_data.get("graph_hash")) or "",
+            nodes=parsed_nodes,
+            created_at=created_at or self._utc_timestamp(),
+            updated_at=updated_at or created_at or self._utc_timestamp(),
+            gate_retries=gate_retries,
+        )
+
+    def _new_checkpoint_state(self, run_id: str) -> CheckpointState:
+        """Build a fresh checkpoint state with all nodes marked pending."""
+        timestamp = self._utc_timestamp()
+        return CheckpointState(
+            run_id=run_id,
+            graph_hash=self.graph_hash,
+            nodes={
+                node_id: NodeCheckpoint(status=NodeStatus.PENDING.value)
+                for node_id in self.graph.nodes
+            },
+            created_at=timestamp,
+            updated_at=timestamp,
+            gate_retries={},
+        )
+
+    def _ensure_node_checkpoint(self, node_id: str) -> NodeCheckpoint:
+        """Return mutable checkpoint entry for node, creating if needed."""
+        if node_id not in self.state.nodes:
+            self.logger.warning(
+                "Node '%s' not present in checkpoint map; creating pending entry",
+                node_id,
+            )
+            self.state.nodes[node_id] = NodeCheckpoint(status=NodeStatus.PENDING.value)
+        return self.state.nodes[node_id]
+
+    @staticmethod
+    def _reset_node_checkpoint(node_checkpoint: NodeCheckpoint) -> None:
+        """Clear node checkpoint fields and reset status to pending."""
+        node_checkpoint.status = NodeStatus.PENDING.value
+        node_checkpoint.started_at = None
+        node_checkpoint.completed_at = None
+        node_checkpoint.output_summary = None
+        node_checkpoint.model_used = None
+        node_checkpoint.artifacts = []
+        node_checkpoint.error_details = None
+
+    @staticmethod
+    def _enum_or_value(value: Any) -> Any:
+        """Return enum `.value` or the raw value for serialization."""
+        if isinstance(value, Enum):
+            return value.value
+        return value
+
+    @staticmethod
+    def _normalize_status(status: Any) -> str:
+        """Normalize status-like values into lowercase strings."""
+        if isinstance(status, NodeStatus):
+            return status.value
+        return str(status).strip().lower()
+
+    @staticmethod
+    def _optional_text(value: Any) -> Optional[str]:
+        """Convert nullable fields to stripped strings."""
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
+    def _utc_timestamp() -> str:
+        """Return current timestamp in ISO 8601 UTC format."""
+        return (
+            datetime.now(timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+
+    @staticmethod
+    def _generate_run_id() -> str:
+        """Generate run identifier in UTC."""
+        return f"run-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
 
 
 # ---------------------------------------------------------------------------
