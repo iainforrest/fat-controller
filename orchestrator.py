@@ -653,6 +653,289 @@ class GraphEngine:
         raise ValueError(f"Unsupported operator '{operator}'")
 
 
+class GoalGate:
+    """Deterministic evaluator for gate node acceptance criteria."""
+
+    def __init__(self, node: GraphNode):
+        self.logger = logging.getLogger("orchestrator")
+        self.node = node
+        self.criteria = [
+            str(item).strip()
+            for item in (node.criteria or [])
+            if str(item).strip()
+        ]
+        self.retry_target = str(node.retry_target).strip() if node.retry_target else None
+        try:
+            self.max_retries = max(1, int(node.max_retries))
+        except (TypeError, ValueError):
+            self.max_retries = 1
+        self._upstream_outcomes: Dict[str, NodeOutcome] = {}
+
+    def evaluate(
+        self,
+        project_dir: Path,
+        upstream_outcomes: Dict[str, NodeOutcome],
+    ) -> NodeOutcome:
+        """Evaluate all configured criteria and return a gate outcome."""
+        started_at = time.monotonic()
+        self._upstream_outcomes = dict(upstream_outcomes or {})
+        criteria_results: Dict[str, bool] = {}
+        failed_criteria: List[str] = []
+
+        for criterion in self.criteria:
+            check_type, params = self._parse_criterion(criterion)
+            evaluation_params = dict(params)
+            evaluation_params["criterion"] = criterion
+            passed = self._evaluate_criterion(
+                check_type=check_type,
+                params=evaluation_params,
+                project_dir=project_dir,
+            )
+            criteria_results[criterion] = passed
+            if not passed:
+                failed_criteria.append(criterion)
+
+        if failed_criteria:
+            failure_summary = (
+                f"Goal gate '{self.node.id}' failed {len(failed_criteria)}/{len(self.criteria)} criteria: "
+                + "; ".join(failed_criteria)
+            )
+            return NodeOutcome(
+                status=NodeStatus.FAILED.value,
+                output_summary=failure_summary,
+                duration=time.monotonic() - started_at,
+                error_details=failure_summary,
+                criteria_results=criteria_results,
+            )
+
+        success_summary = (
+            f"Goal gate '{self.node.id}' passed all {len(self.criteria)} criteria"
+            if self.criteria
+            else f"Goal gate '{self.node.id}' has no criteria and passed by default"
+        )
+        return NodeOutcome(
+            status=NodeStatus.COMPLETED.value,
+            output_summary=success_summary,
+            duration=time.monotonic() - started_at,
+            criteria_results=criteria_results,
+        )
+
+    def _parse_criterion(self, criterion: str) -> Tuple[str, Dict[str, Any]]:
+        """Parse a criterion string into check type and parameters."""
+        criterion_text = str(criterion or "").strip()
+        if not criterion_text:
+            self.logger.warning(
+                "Gate '%s' has empty criterion text",
+                self.node.id,
+            )
+            return ("unknown", {})
+
+        file_exists_match = re.fullmatch(r"file\s+exists:\s*(.+)", criterion_text)
+        if file_exists_match:
+            return (
+                "file_exists",
+                {"path": file_exists_match.group(1).strip()},
+            )
+
+        file_contains_match = re.fullmatch(
+            r"file\s+contains:\s*(.+)",
+            criterion_text,
+        )
+        if file_contains_match:
+            remainder = file_contains_match.group(1).strip()
+            parts = remainder.split(None, 1)
+            if len(parts) != 2:
+                self.logger.warning(
+                    "Invalid 'file contains' criterion for gate '%s': %s",
+                    self.node.id,
+                    criterion_text,
+                )
+                return ("unknown", {})
+            path_text = parts[0].strip()
+            substring = _parse_scalar(parts[1].strip())
+            return (
+                "file_contains",
+                {"path": path_text, "substring": str(substring)},
+            )
+
+        word_count_match = re.fullmatch(
+            r"file\s+word\s+count\s*>=\s*(\d+)\s*:\s*(.+)",
+            criterion_text,
+        )
+        if word_count_match:
+            return (
+                "file_word_count_at_least",
+                {
+                    "minimum": int(word_count_match.group(1)),
+                    "path": word_count_match.group(2).strip(),
+                },
+            )
+
+        command_match = re.fullmatch(r"command\s+passes:\s*(.+)", criterion_text)
+        if command_match:
+            return (
+                "command_passes",
+                {"command": command_match.group(1).strip()},
+            )
+
+        output_match = re.fullmatch(
+            r"output\.([A-Za-z_][\w]*)\s*(==|!=|>=|<=|>|<)\s*(.+)",
+            criterion_text,
+        )
+        if output_match:
+            field_name, operator, raw_value = output_match.groups()
+            return (
+                "output_field",
+                {
+                    "field": field_name,
+                    "operator": operator,
+                    "expected": _parse_scalar(raw_value.strip()),
+                },
+            )
+
+        self.logger.warning(
+            "Unrecognized gate criterion format for gate '%s': %s",
+            self.node.id,
+            criterion_text,
+        )
+        return ("unknown", {})
+
+    def _evaluate_criterion(
+        self,
+        check_type: str,
+        params: Dict[str, Any],
+        project_dir: Path,
+    ) -> bool:
+        """Evaluate one parsed criterion and return pass/fail."""
+        criterion_text = str(params.get("criterion", "")).strip()
+        result = False
+
+        try:
+            if check_type == "file_exists":
+                path = self._resolve_path(str(params.get("path", "")).strip(), project_dir)
+                result = path.exists()
+
+            elif check_type == "file_contains":
+                path = self._resolve_path(str(params.get("path", "")).strip(), project_dir)
+                substring = str(params.get("substring", ""))
+                if path.is_file():
+                    content = path.read_text(encoding="utf-8")
+                    result = substring in content
+                else:
+                    result = False
+
+            elif check_type == "file_word_count_at_least":
+                path = self._resolve_path(str(params.get("path", "")).strip(), project_dir)
+                minimum = int(params.get("minimum", 0))
+                if path.is_file():
+                    content = path.read_text(encoding="utf-8")
+                    result = len(re.findall(r"\S+", content)) >= minimum
+                else:
+                    result = False
+
+            elif check_type == "command_passes":
+                command = str(params.get("command", "")).strip()
+                if command:
+                    completed = subprocess.run(
+                        command,
+                        shell=True,
+                        capture_output=True,
+                        text=True,
+                        cwd=str(project_dir),
+                        check=False,
+                    )
+                    result = completed.returncode == 0
+                else:
+                    result = False
+
+            elif check_type == "output_field":
+                field_name = str(params.get("field", "")).strip()
+                operator = str(params.get("operator", "==")).strip()
+                expected = params.get("expected")
+                result = self._evaluate_output_field(field_name, operator, expected)
+
+            else:
+                result = False
+        except Exception as exc:
+            self.logger.warning(
+                "Failed to evaluate gate criterion '%s' for gate '%s': %s",
+                criterion_text,
+                self.node.id,
+                exc,
+            )
+            result = False
+
+        self.logger.info(
+            "Gate criterion '%s': %s",
+            criterion_text or check_type,
+            "PASS" if result else "FAIL",
+        )
+        return result
+
+    def _evaluate_output_field(
+        self,
+        field_name: str,
+        operator: str,
+        expected: Any,
+    ) -> bool:
+        """Evaluate output.{field} criterion against upstream outcomes."""
+        if not field_name:
+            return False
+        if not self._upstream_outcomes:
+            return False
+
+        for upstream_id in sorted(self._upstream_outcomes):
+            outcome = self._upstream_outcomes[upstream_id]
+            if not hasattr(outcome, field_name):
+                continue
+            actual = getattr(outcome, field_name)
+            try:
+                if self._compare_values(actual, operator, expected):
+                    return True
+            except Exception as exc:
+                self.logger.warning(
+                    "Gate '%s' output criterion compare failed for upstream '%s': %s",
+                    self.node.id,
+                    upstream_id,
+                    exc,
+                )
+        return False
+
+    @staticmethod
+    def _resolve_path(path_text: str, project_dir: Path) -> Path:
+        """Resolve absolute or project-relative file path strings."""
+        path = Path(path_text)
+        if not path.is_absolute():
+            path = project_dir / path
+        return path
+
+    @staticmethod
+    def _compare_values(actual: Any, operator: str, expected: Any) -> bool:
+        """Compare scalar values using supported operators."""
+        if operator == "==":
+            return actual == expected
+        if operator == "!=":
+            return actual != expected
+
+        try:
+            actual_num = float(actual)
+            expected_num = float(expected)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Non-numeric comparison for operator '{operator}'"
+            ) from exc
+
+        if operator == ">":
+            return actual_num > expected_num
+        if operator == "<":
+            return actual_num < expected_num
+        if operator == ">=":
+            return actual_num >= expected_num
+        if operator == "<=":
+            return actual_num <= expected_num
+        raise ValueError(f"Unsupported operator '{operator}'")
+
+
 # ---------------------------------------------------------------------------
 # Domain handlers
 # ---------------------------------------------------------------------------
@@ -1492,11 +1775,25 @@ def detect_domain(outcomes_content: str) -> DomainType:
 
 def _compute_graph_hash(graph: Graph) -> str:
     """Compute deterministic SHA256 hash for graph structure."""
-    def enum_or_value(value: Any) -> Any:
-        if isinstance(value, Enum):
-            return value.value
-        return value
+    canonical_graph = _graph_to_payload(graph)
+    canonical_str = json.dumps(
+        canonical_graph,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
 
+
+def _enum_or_value(value: Any) -> Any:
+    """Return enum `.value` or passthrough scalar for serialization."""
+    if isinstance(value, Enum):
+        return value.value
+    return value
+
+
+def _graph_to_payload(graph: Graph) -> Dict[str, Any]:
+    """Serialize a graph into a deterministic JSON-safe payload."""
     canonical_nodes = []
     for node_id in sorted(graph.nodes):
         node = graph.nodes[node_id]
@@ -1504,11 +1801,11 @@ def _compute_graph_hash(graph: Graph) -> str:
             {
                 "id": node.id,
                 "name": node.name,
-                "type": enum_or_value(node.type),
+                "type": _enum_or_value(node.type),
                 "node_class": node.node_class,
                 "handler": node.handler,
                 "inputs": node.inputs,
-                "context_fidelity": enum_or_value(node.context_fidelity),
+                "context_fidelity": _enum_or_value(node.context_fidelity),
                 "complexity_hint": node.complexity_hint,
                 "discovery_tools": node.discovery_tools,
                 "criteria": node.criteria,
@@ -1535,17 +1832,11 @@ def _compute_graph_hash(graph: Graph) -> str:
         )
 
     canonical_graph = {
-        "domain": enum_or_value(graph.domain),
+        "domain": _enum_or_value(graph.domain),
         "nodes": canonical_nodes,
         "edges": canonical_edges,
     }
-    canonical_str = json.dumps(
-        canonical_graph,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    )
-    return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
+    return canonical_graph
 
 class CheckpointManager:
     """Persist and recover per-node graph execution state."""
@@ -1557,6 +1848,8 @@ class CheckpointManager:
         self.graph_engine = GraphEngine(graph)
         self.checkpoint_path = self.run_dir / "checkpoint.json"
         self.temp_checkpoint_path = self.run_dir / "checkpoint.json.tmp"
+        self.graph_snapshot_path = self.run_dir / "graph.json"
+        self.temp_graph_snapshot_path = self.run_dir / "graph.json.tmp"
         self.graph_hash = self._compute_graph_hash(graph)
 
         generated_run_id = self._generate_run_id()
@@ -1565,6 +1858,7 @@ class CheckpointManager:
         if existing_state is None:
             self.state = self._new_checkpoint_state(generated_run_id)
             self.run_id = self.state.run_id
+            self._write_graph_snapshot()
             return
 
         if existing_state.graph_hash != self.graph_hash:
@@ -1573,6 +1867,7 @@ class CheckpointManager:
             )
             self.state = self._new_checkpoint_state(generated_run_id)
             self.run_id = self.state.run_id
+            self._write_graph_snapshot()
             return
 
         self.state = existing_state
@@ -1624,6 +1919,8 @@ class CheckpointManager:
         if changed:
             self._write_checkpoint()
 
+        self._write_graph_snapshot()
+
     def _compute_graph_hash(self, graph: Graph) -> str:
         """Compute deterministic SHA256 hash for graph structure."""
         return _compute_graph_hash(graph)
@@ -1668,6 +1965,17 @@ class CheckpointManager:
         )
         total = len(self.state.nodes)
         self.logger.info("Checkpoint written: %d/%d nodes complete", completed, total)
+
+    def _write_graph_snapshot(self) -> None:
+        """Persist graph topology for operational commands (validate/invalidate)."""
+        self.run_dir.mkdir(parents=True, exist_ok=True)
+        payload = _graph_to_payload(self.graph)
+        with self.temp_graph_snapshot_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.rename(self.temp_graph_snapshot_path, self.graph_snapshot_path)
 
     def record_node_completion(self, node_id: str, outcome: NodeOutcome) -> None:
         """Record node completion data and persist checkpoint immediately."""
@@ -1716,7 +2024,25 @@ class CheckpointManager:
             return []
         return list(node_state.artifacts)
 
-    def invalidate_nodes(self, node_ids: List[str]) -> None:
+    def increment_gate_retry(self, gate_node_id: str) -> int:
+        """Increment and persist retry attempt count for a gate node."""
+        gate_id = str(gate_node_id).strip()
+        if not gate_id:
+            return 0
+        current = int(self.state.gate_retries.get(gate_id, 0))
+        updated = max(0, current) + 1
+        self.state.gate_retries[gate_id] = updated
+        self._write_checkpoint()
+        return updated
+
+    def get_gate_retry_count(self, gate_node_id: str) -> int:
+        """Read retry attempt count for a gate node from checkpoint state."""
+        gate_id = str(gate_node_id).strip()
+        if not gate_id:
+            return 0
+        return max(0, int(self.state.gate_retries.get(gate_id, 0)))
+
+    def invalidate_nodes(self, node_ids: List[str]) -> List[str]:
         """Reset selected nodes and all downstream nodes to pending."""
         to_reset: Set[str] = set()
         queue: deque[str] = deque(node_ids)
@@ -1738,14 +2064,16 @@ class CheckpointManager:
                     queue.append(downstream_id)
 
         if not to_reset:
-            return
+            return []
 
-        for node_id in sorted(to_reset):
+        sorted_to_reset = sorted(to_reset)
+        for node_id in sorted_to_reset:
             node_checkpoint = self._ensure_node_checkpoint(node_id)
             self._reset_node_checkpoint(node_checkpoint)
             self.logger.info("Invalidated node '%s' (reset to pending)", node_id)
 
         self._write_checkpoint()
+        return sorted_to_reset
 
     def _load_checkpoint(self) -> Optional[CheckpointState]:
         """Load checkpoint.json from disk if present and parse safely."""
@@ -4371,6 +4699,100 @@ def _find_resumable_run_dir(tasks_dir: Path, graph_hash: str) -> Optional[Path]:
     return None
 
 
+def _find_latest_run_dir(tasks_dir: Path) -> Optional[Path]:
+    """Return the newest run-* directory that has a checkpoint file."""
+    run_dirs = sorted(
+        [path for path in tasks_dir.glob("run-*") if path.is_dir()],
+        key=lambda item: item.name,
+        reverse=True,
+    )
+    for run_dir in run_dirs:
+        if (run_dir / "checkpoint.json").is_file():
+            return run_dir
+    return None
+
+
+def _load_graph_from_yaml_file(graph_path: Path) -> Graph:
+    """Load a graph definition file (raw graph YAML or next_graph signal YAML)."""
+    text = graph_path.read_text(encoding="utf-8")
+
+    if SIGNAL_MARKER in text:
+        parsed_signal = parse_signal(text)
+        if str(parsed_signal.get("signal", "")).strip().lower() == "error":
+            details = parsed_signal.get("details", "unknown parse error")
+            raise ValueError(f"Failed to parse signal payload: {details}")
+        graph_candidate = parsed_signal.get("graph")
+        if isinstance(graph_candidate, Graph):
+            return graph_candidate
+        payload = parsed_signal
+    else:
+        payload = _parse_simple_yaml(text)
+
+    if not isinstance(payload, dict):
+        raise ValueError("Graph file must parse to a YAML object")
+
+    embedded_graph = payload.get("graph")
+    if isinstance(embedded_graph, Graph):
+        return embedded_graph
+
+    if isinstance(embedded_graph, dict):
+        graph_payload = dict(embedded_graph)
+        if "domain" not in graph_payload and "domain" in payload:
+            graph_payload["domain"] = payload.get("domain")
+    else:
+        graph_payload = payload
+
+    if not isinstance(graph_payload.get("nodes"), list):
+        raise ValueError("Graph definition missing required 'nodes' list")
+    if not isinstance(graph_payload.get("edges"), list):
+        raise ValueError("Graph definition missing required 'edges' list")
+
+    return _parse_graph_signal(graph_payload)
+
+
+def _load_graph_snapshot(run_dir: Path) -> Graph:
+    """Load persisted graph topology from a run directory."""
+    snapshot_path = run_dir / "graph.json"
+    if not snapshot_path.is_file():
+        raise FileNotFoundError(
+            f"Missing graph snapshot at '{snapshot_path}'. "
+            "Run orchestration once with this version to generate it."
+        )
+
+    payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Graph snapshot '{snapshot_path}' is invalid (expected JSON object)"
+        )
+    return _parse_graph_signal(payload)
+
+
+def _build_gate_upstream_outcomes(
+    gate_node_id: str,
+    graph_engine: GraphEngine,
+    checkpoint_manager: CheckpointManager,
+    runtime_outcomes: Dict[str, NodeOutcome],
+) -> Dict[str, NodeOutcome]:
+    """Build upstream outcome map for gate evaluation, including resumed nodes."""
+    upstream_outcomes: Dict[str, NodeOutcome] = {}
+    status_map = checkpoint_manager.get_status_map()
+
+    for upstream_id in sorted(graph_engine.get_upstream_nodes(gate_node_id)):
+        if upstream_id in runtime_outcomes:
+            upstream_outcomes[upstream_id] = runtime_outcomes[upstream_id]
+            continue
+
+        upstream_outcomes[upstream_id] = NodeOutcome(
+            status=_normalize_node_status(
+                status_map.get(upstream_id, NodeStatus.PENDING.value)
+            ),
+            output_summary=str(checkpoint_manager.get_output_summary(upstream_id) or ""),
+            artifacts=checkpoint_manager.get_artifacts(upstream_id),
+        )
+
+    return upstream_outcomes
+
+
 # ---------------------------------------------------------------------------
 # 7.4 -- Main PM-PL orchestration cycle loop
 # ---------------------------------------------------------------------------
@@ -4618,7 +5040,8 @@ def run_orchestration(state: OrchestratorState) -> int:
             state.checkpoint_manager = checkpoint_manager
             state.run_id = checkpoint_manager.run_id or run_id
 
-            node_results: List[Dict[str, Any]] = []
+            node_results: Dict[str, Dict[str, Any]] = {}
+            node_outcomes: Dict[str, NodeOutcome] = {}
 
             logger.info(
                 "%s",
@@ -4661,6 +5084,92 @@ def run_orchestration(state: OrchestratorState) -> int:
                     check_shutdown(state)
 
                     node = graph.nodes[node_id]
+                    if node.type == NodeType.GATE:
+                        checkpoint_manager.record_node_start(node_id, "gate:evaluator")
+                        gate = GoalGate(node)
+                        upstream_outcomes = _build_gate_upstream_outcomes(
+                            gate_node_id=node.id,
+                            graph_engine=graph_engine,
+                            checkpoint_manager=checkpoint_manager,
+                            runtime_outcomes=node_outcomes,
+                        )
+                        outcome = gate.evaluate(state.project_dir, upstream_outcomes)
+                        checkpoint_manager.record_node_completion(node_id, outcome)
+                        node_outcomes[node.id] = outcome
+
+                        result = _node_outcome_to_result(node, outcome)
+                        node_results[node.id] = result
+
+                        if _normalize_node_status(outcome.status) == NodeStatus.FAILED.value:
+                            retry_count = checkpoint_manager.increment_gate_retry(node.id)
+                            retry_target = gate.retry_target
+                            max_retries = gate.max_retries
+
+                            if retry_count < max_retries and retry_target:
+                                invalidated_nodes = checkpoint_manager.invalidate_nodes(
+                                    [retry_target, node.id]
+                                )
+                                logger.warning(
+                                    "Gate '%s' failed (%d/%d). Retrying via target '%s'.",
+                                    node.id,
+                                    retry_count,
+                                    max_retries,
+                                    retry_target,
+                                )
+                                if invalidated_nodes:
+                                    logger.info(
+                                        "Gate retry invalidated nodes: %s",
+                                        ", ".join(invalidated_nodes),
+                                    )
+                                logger.info(
+                                    "%s",
+                                    render_graph_status(graph, checkpoint_manager.get_status_map()),
+                                )
+                                continue
+
+                            failure_lines = [
+                                (
+                                    f"Gate '{node.id}' failed and exhausted retries "
+                                    f"({retry_count}/{max_retries})"
+                                ),
+                                f"Retry target: {retry_target or 'not configured'}",
+                                f"Criteria results: {json.dumps(outcome.criteria_results, sort_keys=True)}",
+                                (
+                                    "Error details: "
+                                    + str(outcome.error_details or outcome.output_summary)
+                                ),
+                            ]
+                            if not retry_target:
+                                failure_lines.append(
+                                    "Retry routing unavailable: gate.retry_target is not set."
+                                )
+                            failure_context = "\n".join(failure_lines)
+                            logger.error("%s", failure_context)
+                            print("\nGate escalation: retries exhausted.")
+                            print(failure_context)
+                            return 1
+
+                        for edge in graph_engine.forward_edges.get(node_id, []):
+                            condition_active = graph_engine.evaluate_edge_condition(edge, outcome)
+                            logger.info(
+                                "Edge %s -> %s condition '%s' => %s",
+                                edge.source,
+                                edge.target,
+                                edge.condition or "always",
+                                "active" if condition_active else "inactive",
+                            )
+
+                        logger.info(
+                            "Graph gate node '%s' completed with status '%s'",
+                            node.name,
+                            outcome.status,
+                        )
+                        logger.info(
+                            "%s",
+                            render_graph_status(graph, checkpoint_manager.get_status_map()),
+                        )
+                        continue
+
                     model_config = stylesheet_loader.select(node.node_class)
                     model_hint = f"{model_config.provider}:{model_config.model}"
                     checkpoint_manager.record_node_start(node_id, model_hint)
@@ -4697,7 +5206,8 @@ def run_orchestration(state: OrchestratorState) -> int:
                         cycle=state.cycle_count,
                     )
                     result = _node_outcome_to_result(node, outcome)
-                    node_results.append(result)
+                    node_results[node.id] = result
+                    node_outcomes[node.id] = outcome
                     checkpoint_manager.record_node_completion(node_id, outcome)
 
                     if (
@@ -4778,7 +5288,7 @@ def run_orchestration(state: OrchestratorState) -> int:
                     display_map[node_id] = _normalize_node_status(outcome.status)
                     logger.info("%s", render_graph_status(graph, display_map))
 
-            pl_results = node_results
+            pl_results = list(node_results.values())
 
             # Categorize results for logging and PM context.
             categorized = categorize_sprint_results(pl_results)
@@ -4957,6 +5467,84 @@ def archive_completed_project(state: OrchestratorState) -> bool:
     return len(errors) == 0
 
 
+def _run_graph_validation_mode(project_dir: Path, graph_file: Path) -> int:
+    """Validate a graph YAML definition and exit."""
+    candidate = graph_file.expanduser()
+    if not candidate.is_absolute():
+        candidate = (project_dir / candidate).resolve()
+
+    if not candidate.is_file():
+        print(f"Graph validation failed: file not found: {candidate}", file=sys.stderr)
+        return 1
+
+    try:
+        graph = _load_graph_from_yaml_file(candidate)
+    except Exception as exc:
+        print(f"Graph validation failed: unable to parse '{candidate}': {exc}", file=sys.stderr)
+        return 1
+
+    engine = GraphEngine(graph)
+    valid, errors = engine.validate()
+    if valid:
+        print(f"Graph validation PASSED: {candidate}")
+        print(f"Nodes: {len(graph.nodes)} | Edges: {len(graph.edges)}")
+        return 0
+
+    print(f"Graph validation FAILED: {candidate}", file=sys.stderr)
+    for error_text in errors:
+        print(f"- {error_text}", file=sys.stderr)
+    return 1
+
+
+def _run_invalidate_nodes_mode(project_dir: Path, node_ids_csv: str) -> int:
+    """Invalidate selected nodes (plus downstream cascade) in latest run checkpoint."""
+    requested_node_ids: List[str] = []
+    for raw_id in str(node_ids_csv or "").split(","):
+        node_id = raw_id.strip()
+        if node_id and node_id not in requested_node_ids:
+            requested_node_ids.append(node_id)
+
+    if not requested_node_ids:
+        print("Invalidate failed: no node IDs provided", file=sys.stderr)
+        return 1
+
+    tasks_dir = project_dir / "tasks"
+    latest_run = _find_latest_run_dir(tasks_dir)
+    if latest_run is None:
+        print(
+            f"Invalidate failed: no run-* checkpoint directories found in {tasks_dir}",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        graph = _load_graph_snapshot(latest_run)
+    except Exception as exc:
+        print(
+            f"Invalidate failed: unable to load graph snapshot from {latest_run}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    checkpoint_manager = CheckpointManager(str(latest_run), graph)
+    invalidated = checkpoint_manager.invalidate_nodes(requested_node_ids)
+
+    if not invalidated:
+        print(
+            "No nodes were invalidated (all requested node IDs were unknown).",
+            file=sys.stderr,
+        )
+        return 1
+
+    print(
+        f"Invalidated {len(invalidated)} node(s) in {latest_run.name} "
+        f"(requested: {', '.join(requested_node_ids)}):"
+    )
+    for node_id in invalidated:
+        print(f"- {node_id}")
+    return 0
+
+
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
@@ -4968,6 +5556,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
               python3 orchestrator.py /path/to/project
               python3 orchestrator.py . --max-cycles 10
               python3 orchestrator.py ~/myproject --log-level DEBUG --pm-timeout 300
+              python3 orchestrator.py . --validate-graph tasks/sample-graph.yaml
+              python3 orchestrator.py . --invalidate-nodes impl-node,qa-node
         """),
     )
     parser.add_argument(
@@ -5005,6 +5595,22 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         default=False,
         help="Skip interactive VALUES.md prompts (use when launched from /orchestrate command)",
     )
+    parser.add_argument(
+        "--validate-graph",
+        type=Path,
+        help=(
+            "Validate a graph YAML definition and exit without running orchestration. "
+            "Path resolves relative to project_dir when not absolute."
+        ),
+    )
+    parser.add_argument(
+        "--invalidate-nodes",
+        type=str,
+        help=(
+            "Comma-separated node IDs to invalidate in the latest run checkpoint "
+            "(includes downstream cascade), then exit."
+        ),
+    )
 
     return parser.parse_args(argv)
 
@@ -5038,6 +5644,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         "Orchestrator starting: project=%s, max_cycles=%d, pm_timeout=%d, pl_timeout=%d",
         project_dir, state.max_cycles, state.pm_timeout, state.pl_timeout,
     )
+
+    if args.validate_graph is not None and args.invalidate_nodes:
+        print(
+            "Error: --validate-graph and --invalidate-nodes cannot be used together",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.validate_graph is not None:
+        return _run_graph_validation_mode(project_dir, args.validate_graph)
+
+    if args.invalidate_nodes:
+        return _run_invalidate_nodes_mode(project_dir, args.invalidate_nodes)
 
     # --- Pre-flight checks ---
 
