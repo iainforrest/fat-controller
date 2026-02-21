@@ -228,6 +228,9 @@ class OrchestratorState:
     pm_timeout: int = DEFAULT_PM_TIMEOUT
     pl_timeout: int = DEFAULT_PL_TIMEOUT
     values_loaded: bool = False
+    current_graph: Optional["Graph"] = None
+    checkpoint_manager: Optional["CheckpointManager"] = None
+    run_id: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -652,6 +655,63 @@ class GraphEngine:
 # Checkpoint manager
 # ---------------------------------------------------------------------------
 
+def _compute_graph_hash(graph: Graph) -> str:
+    """Compute deterministic SHA256 hash for graph structure."""
+    def enum_or_value(value: Any) -> Any:
+        if isinstance(value, Enum):
+            return value.value
+        return value
+
+    canonical_nodes = []
+    for node_id in sorted(graph.nodes):
+        node = graph.nodes[node_id]
+        canonical_nodes.append(
+            {
+                "id": node.id,
+                "name": node.name,
+                "type": enum_or_value(node.type),
+                "node_class": node.node_class,
+                "handler": node.handler,
+                "inputs": node.inputs,
+                "context_fidelity": enum_or_value(node.context_fidelity),
+                "complexity_hint": node.complexity_hint,
+                "discovery_tools": node.discovery_tools,
+                "criteria": node.criteria,
+                "retry_target": node.retry_target,
+                "max_retries": node.max_retries,
+                "prd_path": node.prd_path,
+                "branch": node.branch,
+                "output_path": node.output_path,
+                "source_materials": node.source_materials,
+            }
+        )
+
+    canonical_edges = []
+    for edge in sorted(
+        graph.edges,
+        key=lambda item: (item.source, item.target, item.condition or "always"),
+    ):
+        canonical_edges.append(
+            {
+                "source": edge.source,
+                "target": edge.target,
+                "condition": edge.condition or "always",
+            }
+        )
+
+    canonical_graph = {
+        "domain": enum_or_value(graph.domain),
+        "nodes": canonical_nodes,
+        "edges": canonical_edges,
+    }
+    canonical_str = json.dumps(
+        canonical_graph,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
+
 class CheckpointManager:
     """Persist and recover per-node graph execution state."""
 
@@ -731,55 +791,7 @@ class CheckpointManager:
 
     def _compute_graph_hash(self, graph: Graph) -> str:
         """Compute deterministic SHA256 hash for graph structure."""
-        canonical_nodes = []
-        for node_id in sorted(graph.nodes):
-            node = graph.nodes[node_id]
-            canonical_nodes.append(
-                {
-                    "id": node.id,
-                    "name": node.name,
-                    "type": self._enum_or_value(node.type),
-                    "node_class": node.node_class,
-                    "handler": node.handler,
-                    "inputs": node.inputs,
-                    "context_fidelity": self._enum_or_value(node.context_fidelity),
-                    "complexity_hint": node.complexity_hint,
-                    "discovery_tools": node.discovery_tools,
-                    "criteria": node.criteria,
-                    "retry_target": node.retry_target,
-                    "max_retries": node.max_retries,
-                    "prd_path": node.prd_path,
-                    "branch": node.branch,
-                    "output_path": node.output_path,
-                    "source_materials": node.source_materials,
-                }
-            )
-
-        canonical_edges = []
-        for edge in sorted(
-            graph.edges,
-            key=lambda item: (item.source, item.target, item.condition or "always"),
-        ):
-            canonical_edges.append(
-                {
-                    "source": edge.source,
-                    "target": edge.target,
-                    "condition": edge.condition or "always",
-                }
-            )
-
-        canonical_graph = {
-            "domain": self._enum_or_value(graph.domain),
-            "nodes": canonical_nodes,
-            "edges": canonical_edges,
-        }
-        canonical_str = json.dumps(
-            canonical_graph,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        )
-        return hashlib.sha256(canonical_str.encode("utf-8")).hexdigest()
+        return _compute_graph_hash(graph)
 
     def _write_checkpoint(self) -> None:
         """Write checkpoint state atomically using write-then-rename."""
@@ -2560,6 +2572,310 @@ def detect_stuck_loop(
 
 
 # ---------------------------------------------------------------------------
+# Graph traversal helpers
+# ---------------------------------------------------------------------------
+
+def _normalize_node_status(status: Any) -> str:
+    """Normalize node status-like values into lowercase strings."""
+    if isinstance(status, NodeStatus):
+        return status.value
+    return str(status).strip().lower()
+
+
+def _status_map_for_ready_nodes(status_map: Dict[str, str]) -> Dict[str, str]:
+    """Adapt checkpoint statuses so traversal can continue after failed nodes."""
+    converted: Dict[str, str] = {}
+    for node_id, status in status_map.items():
+        normalized = _normalize_node_status(status)
+        if normalized in (NodeStatus.FAILED.value, NodeStatus.SKIPPED.value):
+            converted[node_id] = NodeStatus.COMPLETED.value
+        else:
+            converted[node_id] = normalized
+    return converted
+
+
+def _is_terminal_node_status(status: Any) -> bool:
+    """Return True when status represents a finished node state."""
+    normalized = _normalize_node_status(status)
+    return normalized in (
+        NodeStatus.COMPLETED.value,
+        NodeStatus.FAILED.value,
+        NodeStatus.SKIPPED.value,
+    )
+
+
+def _signal_to_display_status(signal: Dict[str, Any]) -> str:
+    """Map PL signal types to pipeline display statuses."""
+    signal_type = str(signal.get("signal", "unknown")).strip().lower()
+    if signal_type == "done":
+        return NodeStatus.COMPLETED.value
+    if signal_type in ("error", "blocked"):
+        return NodeStatus.FAILED.value
+    if signal_type == "skipped":
+        return NodeStatus.SKIPPED.value
+    if signal_type in ("in_progress", "running"):
+        return NodeStatus.IN_PROGRESS.value
+    return NodeStatus.PENDING.value
+
+
+def _node_status_label(status: Any) -> str:
+    """Map normalized statuses to compact DAG labels."""
+    normalized = _normalize_node_status(status)
+    if normalized == NodeStatus.COMPLETED.value:
+        return "DONE"
+    if normalized == NodeStatus.IN_PROGRESS.value:
+        return "RUN"
+    if normalized == NodeStatus.FAILED.value:
+        return "FAIL"
+    if normalized == NodeStatus.SKIPPED.value:
+        return "SKIP"
+    return "PEND"
+
+
+def render_graph_status(graph: Graph, status_map: Dict[str, str]) -> str:
+    """Render DAG execution state with simple ASCII arrows."""
+    children: Dict[str, List[str]] = {node_id: [] for node_id in graph.nodes}
+    incoming_count: Dict[str, int] = {node_id: 0 for node_id in graph.nodes}
+
+    for edge in sorted(graph.edges, key=lambda item: (item.source, item.target)):
+        if edge.source not in graph.nodes or edge.target not in graph.nodes:
+            continue
+        children[edge.source].append(edge.target)
+        incoming_count[edge.target] += 1
+
+    roots = sorted(
+        [node_id for node_id, count in incoming_count.items() if count == 0]
+    )
+    if not roots:
+        roots = sorted(graph.nodes)
+
+    lines = ["Pipeline Status:"]
+    rendered_nodes: Set[str] = set()
+    rendered_edges: Set[Tuple[str, str]] = set()
+
+    def node_line(node_id: str) -> str:
+        node = graph.nodes[node_id]
+        label = _node_status_label(
+            status_map.get(node_id, NodeStatus.PENDING.value)
+        )
+        display_name = node.name or node_id
+        return f"[{label}] {display_name}"
+
+    for root_id in roots:
+        lines.append(f"  {node_line(root_id)}")
+        rendered_nodes.add(root_id)
+        queue: deque[Tuple[str, str]] = deque([(root_id, "    ")])
+
+        while queue:
+            parent_id, indent = queue.popleft()
+            for child_id in sorted(children.get(parent_id, [])):
+                edge_key = (parent_id, child_id)
+                if edge_key in rendered_edges:
+                    continue
+                rendered_edges.add(edge_key)
+
+                lines.append(f"{indent}|-> {node_line(child_id)}")
+                if child_id in rendered_nodes:
+                    continue
+                rendered_nodes.add(child_id)
+                queue.append((child_id, indent + "    "))
+
+    for node_id in sorted(graph.nodes):
+        if node_id in rendered_nodes:
+            continue
+        lines.append(f"  {node_line(node_id)}")
+
+    return "\n".join(lines)
+
+
+def _describe_blocked_nodes(
+    graph: Graph,
+    graph_engine: GraphEngine,
+    status_map: Dict[str, str],
+) -> str:
+    """Build a concise description of pending nodes and unmet dependencies."""
+    blocked: List[str] = []
+    for node_id in sorted(graph.nodes):
+        status = _normalize_node_status(
+            status_map.get(node_id, NodeStatus.PENDING.value)
+        )
+        if status != NodeStatus.PENDING.value:
+            continue
+
+        upstream = sorted(graph_engine.get_upstream_nodes(node_id))
+        if not upstream:
+            blocked.append(f"{node_id}: pending (no upstream dependencies)")
+            continue
+
+        upstream_state = ", ".join(
+            f"{dep}={_normalize_node_status(status_map.get(dep, NodeStatus.PENDING.value))}"
+            for dep in upstream
+        )
+        blocked.append(f"{node_id}: waiting on {upstream_state}")
+
+    return "; ".join(blocked) if blocked else "No blocked node details available"
+
+
+def _execute_graph_node(
+    node: GraphNode,
+    state: OrchestratorState,
+) -> Dict[str, Any]:
+    """Execute one graph node via the current placeholder handler mapping."""
+    sprint_payload = {
+        "name": node.name or node.id,
+        "prd": node.prd_path or "",
+        "branch": node.branch or "",
+        "parallel_safe": False,
+        "graph_node_id": node.id,
+    }
+
+    if node.handler == "software":
+        missing_fields = []
+        if not sprint_payload["prd"]:
+            missing_fields.append("prd_path")
+        if not sprint_payload["branch"]:
+            missing_fields.append("branch")
+        if missing_fields:
+            return {
+                "sprint": sprint_payload,
+                "signal": {
+                    "signal": "error",
+                    "error_type": "invalid_graph_node",
+                    "details": (
+                        f"Node '{node.id}' missing required field(s): "
+                        + ", ".join(missing_fields)
+                    ),
+                },
+            }
+
+        results = execute_sprints([sprint_payload], state)
+        if results:
+            return results[0]
+        return {
+            "sprint": sprint_payload,
+            "signal": {
+                "signal": "error",
+                "error_type": "execution_failed",
+                "details": "execute_sprints returned no results",
+            },
+        }
+
+    return {
+        "sprint": sprint_payload,
+        "signal": {
+            "signal": "error",
+            "error_type": "unsupported_handler",
+            "details": f"Unsupported graph node handler '{node.handler}'",
+        },
+    }
+
+
+def _result_to_node_outcome(
+    node: GraphNode,
+    result: Dict[str, Any],
+    duration: float,
+) -> NodeOutcome:
+    """Translate a node execution result into a checkpoint outcome record."""
+    signal_payload = result.get("signal", {})
+    if not isinstance(signal_payload, dict):
+        signal_payload = {}
+
+    signal_type = str(signal_payload.get("signal", "unknown")).strip().lower()
+    if signal_type == "done":
+        outcome_status = NodeStatus.COMPLETED.value
+    elif signal_type in ("blocked", "error"):
+        outcome_status = NodeStatus.FAILED.value
+    elif signal_type == "skipped":
+        outcome_status = NodeStatus.SKIPPED.value
+    else:
+        outcome_status = NodeStatus.FAILED.value
+
+    summary = ""
+    for key in ("summary", "details", "blocker_description", "reason"):
+        value = signal_payload.get(key)
+        if value is None:
+            continue
+        summary = str(value).strip()
+        if summary:
+            break
+    if not summary:
+        summary = f"Node '{node.id}' finished with signal '{signal_type}'"
+
+    error_details = None
+    if outcome_status == NodeStatus.FAILED.value:
+        error_details = str(
+            signal_payload.get("details")
+            or signal_payload.get("blocker_description")
+            or signal_payload.get("reason")
+            or f"Node '{node.id}' failed with signal '{signal_type}'"
+        ).strip()
+
+    artifacts: List[str] = []
+    sprint_payload = result.get("sprint", {})
+    if isinstance(sprint_payload, dict):
+        branch = sprint_payload.get("branch")
+        if branch:
+            artifacts.append(f"branch:{branch}")
+
+    commit_shas: List[str] = []
+    raw_commit_shas = signal_payload.get("commit_shas")
+    if isinstance(raw_commit_shas, list):
+        commit_shas = [str(sha) for sha in raw_commit_shas if sha]
+    elif isinstance(raw_commit_shas, str) and raw_commit_shas.strip():
+        commit_shas = [raw_commit_shas.strip()]
+
+    return NodeOutcome(
+        status=outcome_status,
+        output_summary=summary,
+        artifacts=artifacts,
+        duration=duration,
+        model_used=node.handler,
+        error_details=error_details,
+        commit_shas=commit_shas,
+        merge_success=result.get("merge_success"),
+        merge_details=result.get("merge_details"),
+    )
+
+
+def _find_resumable_run_dir(tasks_dir: Path, graph_hash: str) -> Optional[Path]:
+    """Find the newest run-* directory with checkpoint hash matching graph."""
+    run_dirs = sorted(
+        [path for path in tasks_dir.glob("run-*") if path.is_dir()],
+        key=lambda item: item.name,
+        reverse=True,
+    )
+    saw_checkpoint = False
+
+    for run_dir in run_dirs:
+        checkpoint_path = run_dir / "checkpoint.json"
+        if not checkpoint_path.is_file():
+            continue
+        saw_checkpoint = True
+
+        try:
+            payload = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Skipping resume candidate '%s' due to unreadable checkpoint: %s",
+                run_dir,
+                exc,
+            )
+            continue
+
+        existing_hash = str(payload.get("graph_hash", "")).strip()
+        if existing_hash and existing_hash == graph_hash:
+            return run_dir
+
+    if saw_checkpoint:
+        logger.info(
+            "Detected prior run checkpoints but none match current graph hash; "
+            "starting a fresh run"
+        )
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # 7.4 -- Main PM-PL orchestration cycle loop
 # ---------------------------------------------------------------------------
 
@@ -2651,31 +2967,71 @@ def run_orchestration(state: OrchestratorState) -> int:
             )
             return 1
 
-        elif signal_type == "next_task":
-            # Reset error retry counter on success
-            pm_error_retries = 0
-
-            sprints_data = pm_signal.get("sprints", [])
+        elif signal_type in ("next_task", "next_graph"):
             pm_summary = pm_signal.get("summary", "")
-            logger.info("PM planned %d sprint(s): %s", len(sprints_data), pm_summary)
 
-            if not sprints_data:
-                logger.error("PM sent next_task signal with empty sprints list")
+            graph = pm_signal.get("graph")
+            if not isinstance(graph, Graph):
+                try:
+                    if signal_type == "next_task":
+                        sprints_data = pm_signal.get("sprints", [])
+                        if not isinstance(sprints_data, list):
+                            logger.error(
+                                "PM sent next_task signal with non-list 'sprints' payload"
+                            )
+                            if pm_error_retries < PM_ERROR_MAX_RETRIES:
+                                pm_error_retries += 1
+                                logger.info(
+                                    "Retrying PM after invalid next_task payload (attempt %d)",
+                                    pm_error_retries + 1,
+                                )
+                                continue
+                            return 1
+                        graph = _sprints_to_graph(sprints_data, pm_signal)
+                    else:
+                        graph = _parse_graph_signal(pm_signal)
+                except Exception as exc:
+                    logger.error("Failed to parse PM %s payload: %s", signal_type, exc)
+                    if pm_error_retries < PM_ERROR_MAX_RETRIES:
+                        pm_error_retries += 1
+                        logger.info(
+                            "Retrying PM after parse failure (attempt %d)",
+                            pm_error_retries + 1,
+                        )
+                        continue
+                    return 1
+
+            if not isinstance(graph, Graph):
+                logger.error("PM %s signal did not produce a valid graph", signal_type)
                 if pm_error_retries < PM_ERROR_MAX_RETRIES:
                     pm_error_retries += 1
+                    logger.info(
+                        "Retrying PM after invalid graph payload (attempt %d)",
+                        pm_error_retries + 1,
+                    )
                     continue
                 return 1
 
-            # Normalize sprint data
-            sprint_tasks = []
-            for s in sprints_data:
-                if isinstance(s, dict):
-                    sprint_tasks.append(s)
-                else:
-                    logger.warning("Skipping non-dict sprint entry: %s", s)
+            logger.info(
+                "PM planned graph with %d node(s), %d edge(s): %s",
+                len(graph.nodes),
+                len(graph.edges),
+                pm_summary,
+            )
+
+            if not graph.nodes:
+                logger.error("PM sent %s signal with empty graph definition", signal_type)
+                if pm_error_retries < PM_ERROR_MAX_RETRIES:
+                    pm_error_retries += 1
+                    logger.info(
+                        "Retrying PM after empty graph signal (attempt %d)",
+                        pm_error_retries + 1,
+                    )
+                    continue
+                return 1
 
             # Stuck loop detection
-            new_names = [s.get("name", "") for s in sprint_tasks]
+            new_names = [node.name for node in graph.nodes.values()]
             for name in new_names:
                 sprint_history.append(name)
 
@@ -2692,13 +3048,132 @@ def run_orchestration(state: OrchestratorState) -> int:
                 )
                 return 1
 
-            # 4. Execute sprints
-            check_shutdown(state)
-            pl_results = execute_sprints(sprint_tasks, state)
+            graph_engine = GraphEngine(graph)
+            graph_valid, validation_errors = graph_engine.validate()
+            if not graph_valid:
+                for error_text in validation_errors:
+                    logger.error("Graph validation error: %s", error_text)
+                if pm_error_retries < PM_ERROR_MAX_RETRIES:
+                    pm_error_retries += 1
+                    logger.info(
+                        "Retrying PM after graph validation failure (attempt %d)",
+                        pm_error_retries + 1,
+                    )
+                    continue
+                logger.error("Graph validation failed after %d retries -- halting", pm_error_retries)
+                return 1
 
-            # 5. Categorize results for logging and PM context
-            #    PM receives ALL results (succeeded + failed + unknown)
-            #    and decides recovery strategy for failures.
+            # Reset error retry counter on successful PM planning.
+            pm_error_retries = 0
+
+            tasks_dir = state.project_dir / "tasks"
+            expected_graph_hash = _compute_graph_hash(graph)
+            resume_run_dir = _find_resumable_run_dir(tasks_dir, expected_graph_hash)
+
+            if resume_run_dir is not None:
+                run_id = resume_run_dir.name
+                run_dir = resume_run_dir
+                logger.info(
+                    "Resuming graph run '%s' from %s (checkpoint hash matched)",
+                    run_id,
+                    run_dir,
+                )
+            else:
+                run_id = f"run-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}"
+                run_dir = tasks_dir / run_id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("Starting new graph run '%s' at %s", run_id, run_dir)
+
+            checkpoint_manager = CheckpointManager(str(run_dir), graph)
+            state.current_graph = graph
+            state.checkpoint_manager = checkpoint_manager
+            state.run_id = checkpoint_manager.run_id or run_id
+
+            node_results: List[Dict[str, Any]] = []
+
+            logger.info(
+                "%s",
+                render_graph_status(graph, checkpoint_manager.get_status_map()),
+            )
+
+            # Graph traversal loop.
+            while True:
+                check_shutdown(state)
+
+                status_map = checkpoint_manager.get_status_map()
+                ready_nodes = graph_engine.get_ready_nodes(
+                    _status_map_for_ready_nodes(status_map)
+                )
+                all_nodes_complete = all(
+                    _is_terminal_node_status(
+                        status_map.get(node_id, NodeStatus.PENDING.value)
+                    )
+                    for node_id in graph.nodes
+                )
+
+                if all_nodes_complete:
+                    break
+
+                if not ready_nodes:
+                    blocked_details = _describe_blocked_nodes(
+                        graph,
+                        graph_engine,
+                        status_map,
+                    )
+                    logger.error(
+                        "Pipeline is stuck: no ready nodes while graph is incomplete"
+                    )
+                    logger.error("Blocked nodes: %s", blocked_details)
+                    print("\nPipeline stuck: no ready nodes while graph is incomplete.")
+                    print(f"Blocked nodes: {blocked_details}")
+                    return 1
+
+                for node_id in ready_nodes:
+                    check_shutdown(state)
+
+                    node = graph.nodes[node_id]
+                    started_at = time.monotonic()
+                    model_hint = f"{node.handler}:{node.node_class}"
+                    checkpoint_manager.record_node_start(node_id, model_hint)
+                    logger.info(
+                        "Executing graph node '%s' (%s)",
+                        node.name,
+                        node.handler,
+                    )
+
+                    result = _execute_graph_node(node, state)
+                    node_results.append(result)
+
+                    duration = time.monotonic() - started_at
+                    outcome = _result_to_node_outcome(node, result, duration)
+                    checkpoint_manager.record_node_completion(node_id, outcome)
+
+                    for edge in graph_engine.forward_edges.get(node_id, []):
+                        condition_active = graph_engine.evaluate_edge_condition(edge, outcome)
+                        logger.info(
+                            "Edge %s -> %s condition '%s' => %s",
+                            edge.source,
+                            edge.target,
+                            edge.condition or "always",
+                            "active" if condition_active else "inactive",
+                        )
+
+                    logger.info(
+                        "Graph node '%s' completed in %.1fs with signal '%s'",
+                        node.name,
+                        duration,
+                        result.get("signal", {}).get("signal", "unknown"),
+                    )
+
+                    display_map = checkpoint_manager.get_status_map()
+                    display_map[node_id] = _signal_to_display_status(
+                        result.get("signal", {})
+                    )
+                    logger.info("%s", render_graph_status(graph, display_map))
+
+            pl_results = node_results
+
+            # Categorize results for logging and PM context.
             categorized = categorize_sprint_results(pl_results)
             logger.info("Sprint execution: %s", categorized["summary"])
 
@@ -2713,13 +3188,7 @@ def run_orchestration(state: OrchestratorState) -> int:
                         sig.get("details", sig.get("blocker_description", "no details")),
                     )
 
-            # 6. Merge successful sprint branches back to main
-            #    The orchestrator handles clean merges directly.
-            #    Conflicts are passed to PM in the next cycle for
-            #    resolution via a conflict-resolution sprint.
-            #    Sequential merge order: if A merges cleanly, proceed
-            #    to B; if B conflicts after A was merged, pass the
-            #    conflict context to PM.
+            # Merge successful sprint branches back to main.
             for result in categorized["succeeded"]:
                 check_shutdown(state)
                 branch = result["sprint"].get("branch", "")
@@ -2742,7 +3211,7 @@ def run_orchestration(state: OrchestratorState) -> int:
                     )
                     result["signal"]["merge_conflict"] = merge_details
 
-            # 7. Re-read roadmap for next PM cycle
+            # Re-read roadmap for next PM cycle
             roadmap_content = read_roadmap(state)
 
         else:
