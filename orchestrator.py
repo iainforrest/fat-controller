@@ -4050,6 +4050,24 @@ def build_pl_context(
 ) -> str:
     """Build the context string passed to the PL agent for a sprint."""
     prd_path = _normalize_task_relative_path(str(sprint["prd"]), project_slug)
+    if project_slug:
+        scoped_tasks_dir = (project_dir / "tasks" / project_slug).resolve()
+        resolved_prd_path = (
+            prd_path.resolve()
+            if prd_path.is_absolute()
+            else (project_dir / prd_path).resolve()
+        )
+        try:
+            resolved_prd_path.relative_to(scoped_tasks_dir)
+        except ValueError as exc:
+            logger.warning(
+                "PRD path '%s' escapes project scope 'tasks/%s/'",
+                prd_path,
+                project_slug,
+            )
+            raise ValueError(
+                f"PRD path '{prd_path}' is outside project scope tasks/{project_slug}/"
+            ) from exc
     prd_absolute = prd_path if prd_path.is_absolute() else project_dir / prd_path
 
     return (
@@ -5561,18 +5579,6 @@ def archive_completed_project(state: OrchestratorState) -> bool:
         )
         return False
 
-    # Ensure shared log directory exists for the next run.
-    agent_logs_dir = state.log_dir.parent / "agent-logs"
-    try:
-        agent_logs_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        logger.warning(
-            "Archived project but failed to recreate %s: %s",
-            agent_logs_dir,
-            exc,
-        )
-        return False
-
     return True
 
 
@@ -5706,6 +5712,8 @@ def _normalize_task_relative_path(path_text: str, project_slug: str) -> Path:
     if not parts or parts[0] != "tasks":
         return raw_path
     if len(parts) >= 2 and parts[1] in {project_slug, "archive"}:
+        return raw_path
+    if len(parts) < 2:
         return raw_path
 
     return Path("tasks") / project_slug / Path(*parts[1:])
