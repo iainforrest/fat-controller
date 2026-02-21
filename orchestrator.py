@@ -1096,6 +1096,343 @@ class ContentHandler(NodeHandler):
         return ([self._relative_path(path, project_dir) for path in generated_files], None)
 
 
+class DiscoveryHandler(NodeHandler):
+    """Execute discovery nodes and persist approach decisions to CONTEXT.md."""
+
+    def execute(
+        self,
+        node: GraphNode,
+        context: str,
+        config: ModelConfig,
+        project_dir: Path,
+        cycle: int = 0,
+    ) -> NodeOutcome:
+        started_at = time.monotonic()
+        model_used = f"{config.provider}:{config.model}"
+        work_dir = project_dir / "tasks" / node.id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        context_path = work_dir / "CONTEXT.md"
+
+        complexity_hint = str(node.complexity_hint or "").strip().lower()
+        if complexity_hint in ("simple", "complex"):
+            complexity = complexity_hint
+            logger.info(
+                "Discovery node '%s' using explicit complexity hint '%s'",
+                node.id,
+                complexity,
+            )
+        else:
+            outcome_description = self._outcome_description(node)
+            constraints = self._extract_constraints(node)
+            complexity = self._detect_complexity(outcome_description, constraints)
+            logger.info(
+                "Discovery node '%s' auto-detected complexity '%s'",
+                node.id,
+                complexity,
+            )
+
+        if complexity == "simple":
+            discovery_context = self._build_simple_discovery_context(node)
+        else:
+            discovery_context = self._build_complex_discovery_context(node)
+        if context:
+            discovery_context += f"\n\nUPSTREAM_CONTEXT:\n{context}"
+
+        signal_payload: Dict[str, Any]
+        try:
+            output = invoke_agent(
+                "discovery",
+                discovery_context,
+                work_dir,
+                timeout=max(1, int(config.timeout or DEFAULT_PL_TIMEOUT)),
+                cycle=cycle,
+            )
+            signal_payload = parse_signal(output)
+        except subprocess.TimeoutExpired:
+            signal_payload = {
+                "signal": "error",
+                "error_type": "timeout",
+                "details": (
+                    "Discovery agent timed out after "
+                    f"{max(1, int(config.timeout or DEFAULT_PL_TIMEOUT))}s"
+                ),
+            }
+        except RuntimeError as exc:
+            signal_payload = {
+                "signal": "error",
+                "error_type": "invocation_failed",
+                "details": str(exc),
+            }
+        except Exception as exc:
+            signal_payload = {
+                "signal": "error",
+                "error_type": "execution_failed",
+                "details": str(exc),
+            }
+
+        summary = self._signal_summary(signal_payload, node.id)
+        context_markdown = self._compose_context_markdown(
+            node=node,
+            complexity=complexity,
+            summary=summary,
+            signal_payload=signal_payload,
+        )
+        try:
+            context_path.write_text(context_markdown, encoding="utf-8")
+        except OSError as exc:
+            details = f"Failed to write discovery context file '{context_path}': {exc}"
+            return NodeOutcome(
+                status=NodeStatus.FAILED.value,
+                output_summary=details,
+                duration=time.monotonic() - started_at,
+                model_used=model_used,
+                error_details=details,
+                artifacts=[],
+            )
+
+        return NodeOutcome(
+            status=self._signal_to_outcome_status(signal_payload),
+            output_summary=summary,
+            artifacts=[self._relative_path(context_path, project_dir)],
+            duration=time.monotonic() - started_at,
+            model_used=model_used,
+            error_details=self._signal_error(signal_payload, node.id),
+            commit_shas=[],
+            merge_success=None,
+            merge_details=None,
+        )
+
+    def _detect_complexity(
+        self,
+        outcome_description: str,
+        constraints: List[str],
+    ) -> str:
+        """Classify discovery complexity using lightweight keyword heuristics."""
+        text = " ".join(
+            [str(outcome_description or "").strip()]
+            + [str(item or "").strip() for item in constraints]
+        ).lower()
+        simple_reasons: List[str] = []
+        complex_reasons: List[str] = []
+
+        simple_keywords = ("report", "presentation", "document", "slides")
+        complex_keywords = (
+            "build",
+            "implement",
+            "system",
+            "architecture",
+            "infrastructure",
+        )
+        choice_keywords = ("or", "vs", "versus", "choice", "decide")
+        integration_keywords = ("integrate", "api", "third-party", "external")
+        uncertainty_keywords = ("not sure", "maybe", "could be", "options")
+
+        for keyword in simple_keywords:
+            if re.search(rf"\b{re.escape(keyword)}\b", text):
+                simple_reasons.append(f"simple keyword '{keyword}'")
+        for keyword in complex_keywords:
+            if re.search(rf"\b{re.escape(keyword)}\b", text):
+                complex_reasons.append(f"complex keyword '{keyword}'")
+        for keyword in choice_keywords:
+            if re.search(rf"\b{re.escape(keyword)}\b", text):
+                complex_reasons.append(f"approach-choice keyword '{keyword}'")
+                break
+        for keyword in integration_keywords:
+            if re.search(rf"\b{re.escape(keyword)}\b", text):
+                complex_reasons.append(f"integration keyword '{keyword}'")
+        for keyword in uncertainty_keywords:
+            if re.search(rf"\b{re.escape(keyword)}\b", text):
+                complex_reasons.append(f"uncertainty keyword '{keyword}'")
+                break
+
+        explicit_format_patterns = (
+            r"\bpowerpoint\b",
+            r"\bslide deck\b",
+            r"\bformat\b",
+            r"\btemplate\b",
+        )
+        if any(re.search(pattern, text) for pattern in explicit_format_patterns):
+            simple_reasons.append("explicit format constraint detected")
+        if re.search(r"\b(single|straightforward|obvious)\b", text):
+            simple_reasons.append("single reasonable approach indicated")
+
+        if complex_reasons:
+            logger.info(
+                "Discovery complexity classified as 'complex': %s",
+                ", ".join(complex_reasons),
+            )
+            return "complex"
+        if simple_reasons:
+            logger.info(
+                "Discovery complexity classified as 'simple': %s",
+                ", ".join(simple_reasons),
+            )
+            return "simple"
+
+        logger.info(
+            "Discovery complexity ambiguous; defaulting to 'complex' (description=%r)",
+            outcome_description,
+        )
+        return "complex"
+
+    def _build_simple_discovery_context(self, node: GraphNode) -> str:
+        """Build a compact discovery prompt for straightforward outcomes."""
+        constraints = self._extract_constraints(node)
+        lines = [
+            "DISCOVERY_MODE: simple",
+            "TOKEN_BUDGET: ~2000",
+            f"OUTCOME_NAME: {node.name or node.id}",
+            f"OUTCOME_DESCRIPTION: {self._outcome_description(node)}",
+            "TASK: Produce a concise approach decision for this outcome.",
+            "REQUIRED_SECTIONS:",
+            "- ## Approach",
+            "- ## Rationale",
+            "- ## Constraints",
+            "OUTPUT_FILE: tasks/{node-id}/CONTEXT.md",
+            "Also emit ORCHESTRATOR_SIGNAL with signal=done, summary, context_path, complexity_used.",
+        ]
+        if constraints:
+            lines.append("CONSTRAINTS:\n" + "\n".join(f"- {item}" for item in constraints))
+        return "\n".join(lines)
+
+    def _build_complex_discovery_context(self, node: GraphNode) -> str:
+        """Build a deep-investigation discovery prompt for ambiguous outcomes."""
+        constraints = self._extract_constraints(node)
+        lines = [
+            "DISCOVERY_MODE: complex",
+            f"OUTCOME_NAME: {node.name or node.id}",
+            f"OUTCOME_DESCRIPTION: {self._outcome_description(node)}",
+            "TASK: Perform a deeper discovery before implementation.",
+            "PROCESS:",
+            "1. Use /investigate for technical and delivery options.",
+            "2. Optionally use /debate when trade-offs are non-obvious.",
+            "3. Synthesize findings into a recommended approach.",
+            "REQUIRED_SECTIONS:",
+            "- ## Approach",
+            "- ## Rationale",
+            "- ## Constraints",
+            "- ## Investigation Findings",
+            "- ## Alternatives Considered",
+            "OUTPUT_FILE: tasks/{node-id}/CONTEXT.md",
+            "Also emit ORCHESTRATOR_SIGNAL with signal=done, summary, context_path, complexity_used.",
+        ]
+        if node.discovery_tools:
+            lines.append(
+                "DISCOVERY_TOOLS:\n"
+                + "\n".join(f"- {tool}" for tool in node.discovery_tools)
+            )
+        if constraints:
+            lines.append("CONSTRAINTS:\n" + "\n".join(f"- {item}" for item in constraints))
+        return "\n".join(lines)
+
+    def _compose_context_markdown(
+        self,
+        node: GraphNode,
+        complexity: str,
+        summary: str,
+        signal_payload: Dict[str, Any],
+    ) -> str:
+        """Create deterministic CONTEXT.md content expected by downstream nodes."""
+        constraints = self._extract_constraints(node)
+        approach = str(
+            signal_payload.get("approach")
+            or summary
+            or "Use a pragmatic approach aligned to the outcome constraints."
+        ).strip()
+        rationale = str(
+            signal_payload.get("rationale")
+            or "This approach balances speed, clarity, and implementation risk."
+        ).strip()
+
+        lines = [
+            f"# Discovery: {node.name or node.id}",
+            "",
+            "## Approach",
+            approach,
+            "",
+            "## Rationale",
+            rationale,
+            "",
+            "## Constraints",
+        ]
+        if constraints:
+            lines.extend(f"- {item}" for item in constraints)
+        else:
+            lines.append("- No explicit constraints were provided.")
+
+        if complexity == "complex":
+            findings = str(
+                signal_payload.get("investigation_findings")
+                or signal_payload.get("findings")
+                or "Investigation covered delivery approach, implementation risks, and integration trade-offs."
+            ).strip()
+            alternatives = str(
+                signal_payload.get("alternatives_considered")
+                or signal_payload.get("alternatives")
+                or "Alternatives were considered and rejected due to higher risk, slower delivery, or weaker fit."
+            ).strip()
+            lines.extend(
+                [
+                    "",
+                    "## Investigation Findings",
+                    findings,
+                    "",
+                    "## Alternatives Considered",
+                    alternatives,
+                ]
+            )
+
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _outcome_description(self, node: GraphNode) -> str:
+        """Extract the best available outcome description from node payload."""
+        candidates = [
+            node.inputs.get("outcome_description"),
+            node.inputs.get("outcome"),
+            node.inputs.get("goal"),
+            node.inputs.get("description"),
+            node.name,
+            node.id,
+        ]
+        for value in candidates:
+            text = str(value or "").strip()
+            if text:
+                return text
+        return node.id
+
+    def _extract_constraints(self, node: GraphNode) -> List[str]:
+        """Collect and normalize constraints from graph node fields."""
+        collected: List[str] = []
+        collected.extend(str(item).strip() for item in node.criteria if str(item).strip())
+
+        raw_constraints = node.inputs.get("constraints")
+        if isinstance(raw_constraints, list):
+            collected.extend(str(item).strip() for item in raw_constraints if str(item).strip())
+        elif isinstance(raw_constraints, str) and raw_constraints.strip():
+            collected.append(raw_constraints.strip())
+
+        for key in ("constraint", "format", "output_format", "format_constraints"):
+            value = node.inputs.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                collected.append(f"{key}: {text}")
+
+        deduped: List[str] = []
+        seen: Set[str] = set()
+        for item in collected:
+            normalized = item.strip()
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(normalized)
+        return deduped
+
+
 def detect_domain(outcomes_content: str) -> DomainType:
     """Infer orchestration domain from outcomes text using keyword density."""
     software_keywords = (
@@ -1366,6 +1703,13 @@ class CheckpointManager:
         if node_state is None:
             return None
         return node_state.output_summary
+
+    def get_artifacts(self, node_id: str) -> List[str]:
+        """Return node artifact paths from checkpoint if present."""
+        node_state = self.state.nodes.get(node_id)
+        if node_state is None:
+            return []
+        return list(node_state.artifacts)
 
     def invalidate_nodes(self, node_ids: List[str]) -> None:
         """Reset selected nodes and all downstream nodes to pending."""
@@ -3552,10 +3896,67 @@ def _describe_blocked_nodes(
     return "; ".join(blocked) if blocked else "No blocked node details available"
 
 
+def _collect_downstream_nodes(graph_engine: GraphEngine, start_node_id: str) -> List[str]:
+    """Return all transitive downstream node IDs from the starting node."""
+    queue: deque[str] = deque([start_node_id])
+    seen: Set[str] = set()
+
+    while queue:
+        current = queue.popleft()
+        for downstream_id in graph_engine.get_downstream_nodes(current):
+            if downstream_id in seen:
+                continue
+            seen.add(downstream_id)
+            queue.append(downstream_id)
+
+    return sorted(seen)
+
+
+def _resolve_discovery_context_artifact(
+    upstream_id: str,
+    checkpoint_manager: "CheckpointManager",
+    project_dir: Path,
+) -> Optional[Tuple[str, Path]]:
+    """Resolve discovery CONTEXT.md artifact path for an upstream node."""
+    artifact_paths = checkpoint_manager.get_artifacts(upstream_id)
+    candidates: List[str] = []
+
+    for artifact in artifact_paths:
+        artifact_text = str(artifact or "").strip()
+        if not artifact_text:
+            continue
+        if Path(artifact_text).name.lower() == "context.md":
+            candidates.append(artifact_text)
+
+    if not candidates:
+        candidates.append(f"tasks/{upstream_id}/CONTEXT.md")
+
+    for candidate in candidates:
+        path = Path(candidate)
+        if not path.is_absolute():
+            path = project_dir / path
+        if not path.is_file():
+            continue
+
+        try:
+            relative = str(path.resolve().relative_to(project_dir.resolve()))
+        except ValueError:
+            relative = str(path)
+        return (relative, path)
+
+    logger.warning(
+        "CONTEXT.md missing for discovery node '%s'; checked candidates: %s",
+        upstream_id,
+        ", ".join(candidates),
+    )
+    return None
+
+
 def _build_node_context(
     node: GraphNode,
     graph_engine: GraphEngine,
     checkpoint_manager: "CheckpointManager",
+    project_dir: Path,
 ) -> str:
     """Build node context according to the configured fidelity mode."""
     fidelity = _coerce_enum(
@@ -3565,15 +3966,58 @@ def _build_node_context(
         f"graph node '{node.id}' context_fidelity",
     )
 
-    if fidelity == ContextFidelityMode.MINIMAL:
-        return ""
-
     upstream_nodes = sorted(graph_engine.get_upstream_nodes(node.id))
     if not upstream_nodes:
         return ""
 
     summaries: List[Tuple[str, str]] = []
+    discovery_references: List[Tuple[str, str]] = []
+    discovery_contents: List[Tuple[str, str, str]] = []
+
     for upstream_id in upstream_nodes:
+        upstream_node = graph_engine.graph.nodes.get(upstream_id)
+        is_discovery = (
+            upstream_node is not None and upstream_node.type == NodeType.DISCOVERY
+        )
+
+        if is_discovery:
+            resolved = _resolve_discovery_context_artifact(
+                upstream_id,
+                checkpoint_manager,
+                project_dir,
+            )
+            if resolved is not None:
+                relative_path, absolute_path = resolved
+                if fidelity == ContextFidelityMode.MINIMAL:
+                    discovery_references.append((upstream_id, relative_path))
+                else:
+                    try:
+                        file_text = absolute_path.read_text(encoding="utf-8").strip()
+                    except OSError as exc:
+                        logger.warning(
+                            "Failed to read CONTEXT.md for discovery node '%s': %s",
+                            upstream_id,
+                            exc,
+                        )
+                    else:
+                        if file_text:
+                            content = (
+                                file_text[:2000]
+                                if fidelity == ContextFidelityMode.PARTIAL
+                                else file_text
+                            )
+                            discovery_contents.append(
+                                (upstream_id, relative_path, content)
+                            )
+                            logger.info(
+                                "Including CONTEXT.md from discovery node '%s' in context for '%s'",
+                                upstream_id,
+                                node.id,
+                            )
+
+        if fidelity == ContextFidelityMode.MINIMAL:
+            continue
+
         summary = checkpoint_manager.get_output_summary(upstream_id)
         if summary is None:
             continue
@@ -3581,7 +4025,18 @@ def _build_node_context(
         if text:
             summaries.append((upstream_id, text))
 
-    if not summaries:
+    if fidelity == ContextFidelityMode.MINIMAL:
+        if not discovery_references:
+            return ""
+        lines = [
+            f"UPSTREAM_CONTEXT_FIDELITY: {fidelity.value}",
+            "DISCOVERY_CONTEXT_REFERENCES:",
+        ]
+        for upstream_id, path_text in discovery_references:
+            lines.append(f"- {upstream_id}: {path_text}")
+        return "\n".join(lines)
+
+    if not summaries and not discovery_contents:
         return ""
 
     if fidelity == ContextFidelityMode.PARTIAL:
@@ -3592,12 +4047,18 @@ def _build_node_context(
     else:
         clipped = summaries
 
-    lines = [
-        f"UPSTREAM_CONTEXT_FIDELITY: {fidelity.value}",
-        "UPSTREAM_NODE_SUMMARIES:",
-    ]
-    for upstream_id, text in clipped:
-        lines.append(f"- {upstream_id}: {text}")
+    lines = [f"UPSTREAM_CONTEXT_FIDELITY: {fidelity.value}"]
+    if clipped:
+        lines.append("UPSTREAM_NODE_SUMMARIES:")
+        for upstream_id, text in clipped:
+            lines.append(f"- {upstream_id}: {text}")
+    if discovery_contents:
+        lines.append("DISCOVERY_CONTEXT_CONTENT:")
+        for upstream_id, path_text, text in discovery_contents:
+            lines.append(f"--- BEGIN {upstream_id} ({path_text}) ---")
+            lines.append(text)
+            lines.append(f"--- END {upstream_id} ---")
+
     return "\n".join(lines)
 
 
@@ -3704,6 +4165,7 @@ def run_orchestration(state: OrchestratorState) -> int:
     handler_registry: Dict[str, NodeHandler] = {
         DomainType.SOFTWARE.value: SoftwareHandler(),
         DomainType.CONTENT.value: ContentHandler(),
+        NodeType.DISCOVERY.value: DiscoveryHandler(),
     }
 
     while state.cycle_count < state.max_cycles:
@@ -3998,6 +4460,7 @@ def run_orchestration(state: OrchestratorState) -> int:
                         node,
                         graph_engine,
                         checkpoint_manager,
+                        state.project_dir,
                     )
                     logger.info(
                         "Executing graph node '%s' (%s via %s)",
@@ -4016,6 +4479,57 @@ def run_orchestration(state: OrchestratorState) -> int:
                     result = _node_outcome_to_result(node, outcome)
                     node_results.append(result)
                     checkpoint_manager.record_node_completion(node_id, outcome)
+
+                    if (
+                        node.type == NodeType.DISCOVERY
+                        and _normalize_node_status(outcome.status) == NodeStatus.COMPLETED.value
+                    ):
+                        context_artifact = next(
+                            (
+                                str(artifact).strip()
+                                for artifact in outcome.artifacts
+                                if str(artifact).strip()
+                                and Path(str(artifact)).name.lower() == "context.md"
+                            ),
+                            "",
+                        )
+                        if not context_artifact:
+                            logger.warning(
+                                "Discovery node '%s' completed without CONTEXT.md artifact",
+                                node.id,
+                            )
+                        else:
+                            context_artifact_path = Path(context_artifact)
+                            if not context_artifact_path.is_absolute():
+                                context_artifact_path = state.project_dir / context_artifact_path
+                            if not context_artifact_path.is_file():
+                                logger.warning(
+                                    "CONTEXT.md missing after discovery node '%s' completion: %s",
+                                    node.id,
+                                    context_artifact,
+                                )
+
+                        for downstream_id in _collect_downstream_nodes(graph_engine, node.id):
+                            downstream_node = graph.nodes.get(downstream_id)
+                            if downstream_node is None:
+                                continue
+                            if str(downstream_node.node_class).strip().lower() != "planning":
+                                continue
+
+                            current_fidelity = _coerce_enum(
+                                ContextFidelityMode,
+                                downstream_node.context_fidelity,
+                                ContextFidelityMode.MINIMAL,
+                                f"graph node '{downstream_node.id}' context_fidelity",
+                            )
+                            if current_fidelity == ContextFidelityMode.MINIMAL:
+                                downstream_node.context_fidelity = ContextFidelityMode.PARTIAL
+                                logger.info(
+                                    "Promoted planning node '%s' context_fidelity to '%s' due to discovery node '%s'",
+                                    downstream_node.id,
+                                    ContextFidelityMode.PARTIAL.value,
+                                    node.id,
+                                )
 
                     for edge in graph_engine.forward_edges.get(node_id, []):
                         condition_active = graph_engine.evaluate_edge_condition(edge, outcome)
