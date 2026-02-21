@@ -25,10 +25,12 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import textwrap
 import time
 from collections import deque
@@ -325,6 +327,19 @@ class NodeOutcome:
     criteria_results: Dict[str, bool] = field(default_factory=dict)
 
 
+ALLOWED_OUTCOME_FIELDS = frozenset({
+    "status",
+    "output_summary",
+    "duration",
+    "model_used",
+    "error_details",
+    "merge_success",
+    "artifacts",
+    "commit_shas",
+    "criteria_results",
+})
+
+
 @dataclass
 class ModelConfig:
     """Model provider configuration for a graph node class."""
@@ -391,6 +406,32 @@ def check_shutdown(state: Optional[OrchestratorState] = None) -> None:
             )
         logger.info("Graceful shutdown: exiting between operations")
         sys.exit(0)
+
+
+def _compare_scalar_values(actual: Any, operator: str, expected: Any) -> bool:
+    """Compare scalar values using supported operators."""
+    if operator == "==":
+        return actual == expected
+    if operator == "!=":
+        return actual != expected
+
+    try:
+        actual_num = float(actual)
+        expected_num = float(expected)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Non-numeric comparison for operator '{operator}'"
+        ) from exc
+
+    if operator == ">":
+        return actual_num > expected_num
+    if operator == "<":
+        return actual_num < expected_num
+    if operator == ">=":
+        return actual_num >= expected_num
+    if operator == "<=":
+        return actual_num <= expected_num
+    raise ValueError(f"Unsupported operator '{operator}'")
 
 
 # ---------------------------------------------------------------------------
@@ -473,12 +514,16 @@ class GraphEngine:
 
         return (len(errors) == 0, errors)
 
-    def get_ready_nodes(self, status_map: Dict[str, str]) -> List[str]:
+    def get_ready_nodes(
+        self,
+        status_map: Dict[str, str],
+        outcome_map: Optional[Dict[str, NodeOutcome]] = None,
+    ) -> List[str]:
         """Return nodes whose dependencies are complete and edges are active."""
         ready: List[str] = []
 
         for node_id in self.graph.nodes:
-            current_status = self._normalize_status(
+            current_status = _normalize_node_status(
                 status_map.get(node_id, NodeStatus.PENDING.value)
             )
             if node_id in status_map and current_status != NodeStatus.PENDING.value:
@@ -491,17 +536,27 @@ class GraphEngine:
 
             is_ready = True
             for edge in incoming:
-                source_status = self._normalize_status(
+                source_status = _normalize_node_status(
                     status_map.get(edge.source, "")
                 )
-                if source_status != NodeStatus.COMPLETED.value:
+                if source_status not in (
+                    NodeStatus.COMPLETED.value,
+                    NodeStatus.FAILED.value,
+                    NodeStatus.SKIPPED.value,
+                ):
                     is_ready = False
                     break
 
-                source_outcome = NodeOutcome(
-                    status=source_status,
-                    output_summary="",
+                source_outcome = (
+                    outcome_map.get(edge.source)
+                    if outcome_map is not None
+                    else None
                 )
+                if source_outcome is None:
+                    source_outcome = NodeOutcome(
+                        status=source_status,
+                        output_summary="",
+                    )
                 if not self.evaluate_edge_condition(edge, source_outcome):
                     is_ready = False
                     break
@@ -535,7 +590,7 @@ class GraphEngine:
         )
         if status_match:
             status_check = status_match.group(1)
-            actual_status = self._normalize_status(source_outcome.status)
+            actual_status = _normalize_node_status(source_outcome.status)
             if status_check == "pass":
                 return actual_status == NodeStatus.COMPLETED.value
             return actual_status == NodeStatus.FAILED.value
@@ -552,14 +607,26 @@ class GraphEngine:
             return False
 
         field_name, operator, raw_value = output_match.groups()
+        if field_name not in ALLOWED_OUTCOME_FIELDS:
+            logger.warning(
+                "Disallowed edge condition field '%s' for edge %s -> %s",
+                field_name,
+                edge.source,
+                edge.target,
+            )
+            return False
         try:
             if not hasattr(source_outcome, field_name):
-                raise AttributeError(
-                    f"NodeOutcome has no field '{field_name}'"
+                logger.warning(
+                    "Edge condition references missing NodeOutcome field '%s' for edge %s -> %s",
+                    field_name,
+                    edge.source,
+                    edge.target,
                 )
+                return False
             actual_value = getattr(source_outcome, field_name)
             expected_value = _parse_scalar(raw_value.strip())
-            return self._compare_values(actual_value, operator, expected_value)
+            return _compare_scalar_values(actual_value, operator, expected_value)
         except Exception as exc:
             logger.warning(
                 "Failed to evaluate edge condition '%s' for edge %s -> %s: %s",
@@ -618,40 +685,6 @@ class GraphEngine:
                 return cycle
 
         return []
-
-    @staticmethod
-    def _normalize_status(status: Any) -> str:
-        """Normalize status values to lowercase strings."""
-        if isinstance(status, NodeStatus):
-            return status.value
-        return str(status).strip().lower()
-
-    @staticmethod
-    def _compare_values(actual: Any, operator: str, expected: Any) -> bool:
-        """Compare values for edge condition evaluation."""
-        if operator == "==":
-            return actual == expected
-        if operator == "!=":
-            return actual != expected
-
-        try:
-            actual_num = float(actual)
-            expected_num = float(expected)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Non-numeric comparison for operator '{operator}'"
-            ) from exc
-
-        if operator == ">":
-            return actual_num > expected_num
-        if operator == "<":
-            return actual_num < expected_num
-        if operator == ">=":
-            return actual_num >= expected_num
-        if operator == "<=":
-            return actual_num <= expected_num
-        raise ValueError(f"Unsupported operator '{operator}'")
-
 
 class GoalGate:
     """Deterministic evaluator for gate node acceptance criteria."""
@@ -836,15 +869,28 @@ class GoalGate:
             elif check_type == "command_passes":
                 command = str(params.get("command", "")).strip()
                 if command:
-                    completed = subprocess.run(
-                        command,
-                        shell=True,
-                        capture_output=True,
-                        text=True,
-                        cwd=str(project_dir),
-                        check=False,
-                    )
-                    result = completed.returncode == 0
+                    parsed_command = shlex.split(command)
+                    if not parsed_command:
+                        result = False
+                    else:
+                        try:
+                            completed = subprocess.run(
+                                parsed_command,
+                                shell=False,
+                                capture_output=True,
+                                text=True,
+                                cwd=str(project_dir),
+                                check=False,
+                                timeout=120,
+                            )
+                            result = completed.returncode == 0
+                        except subprocess.TimeoutExpired:
+                            self.logger.warning(
+                                "Gate criterion command timed out after 120s for gate '%s': %s",
+                                self.node.id,
+                                command,
+                            )
+                            result = False
                 else:
                     result = False
 
@@ -890,7 +936,7 @@ class GoalGate:
                 continue
             actual = getattr(outcome, field_name)
             try:
-                if self._compare_values(actual, operator, expected):
+                if _compare_scalar_values(actual, operator, expected):
                     return True
             except Exception as exc:
                 self.logger.warning(
@@ -908,32 +954,6 @@ class GoalGate:
         if not path.is_absolute():
             path = project_dir / path
         return path
-
-    @staticmethod
-    def _compare_values(actual: Any, operator: str, expected: Any) -> bool:
-        """Compare scalar values using supported operators."""
-        if operator == "==":
-            return actual == expected
-        if operator == "!=":
-            return actual != expected
-
-        try:
-            actual_num = float(actual)
-            expected_num = float(expected)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Non-numeric comparison for operator '{operator}'"
-            ) from exc
-
-        if operator == ">":
-            return actual_num > expected_num
-        if operator == "<":
-            return actual_num < expected_num
-        if operator == ">=":
-            return actual_num >= expected_num
-        if operator == "<=":
-            return actual_num <= expected_num
-        raise ValueError(f"Unsupported operator '{operator}'")
 
 
 # ---------------------------------------------------------------------------
@@ -1892,7 +1912,7 @@ class CheckpointManager:
 
         # in_progress indicates the process likely crashed mid-node.
         for node_id, checkpoint in self.state.nodes.items():
-            status = self._normalize_status(checkpoint.status)
+            status = _normalize_node_status(checkpoint.status)
             checkpoint.status = status
             if status != NodeStatus.IN_PROGRESS.value:
                 continue
@@ -1906,7 +1926,7 @@ class CheckpointManager:
 
         # Missing summaries are a quality signal only; keep completed status.
         for node_id, checkpoint in self.state.nodes.items():
-            if self._normalize_status(checkpoint.status) != NodeStatus.COMPLETED.value:
+            if _normalize_node_status(checkpoint.status) != NodeStatus.COMPLETED.value:
                 continue
             summary = checkpoint.output_summary or ""
             if summary.strip():
@@ -1941,7 +1961,7 @@ class CheckpointManager:
         for node_id in sorted(self.state.nodes):
             node_state = self.state.nodes[node_id]
             payload["nodes"][node_id] = {
-                "status": self._normalize_status(node_state.status),
+                "status": _normalize_node_status(node_state.status),
                 "started_at": node_state.started_at,
                 "completed_at": node_state.completed_at,
                 "output_summary": node_state.output_summary,
@@ -1961,7 +1981,7 @@ class CheckpointManager:
         completed = sum(
             1
             for node in self.state.nodes.values()
-            if self._normalize_status(node.status) == NodeStatus.COMPLETED.value
+            if _normalize_node_status(node.status) == NodeStatus.COMPLETED.value
         )
         total = len(self.state.nodes)
         self.logger.info("Checkpoint written: %d/%d nodes complete", completed, total)
@@ -1980,7 +2000,7 @@ class CheckpointManager:
     def record_node_completion(self, node_id: str, outcome: NodeOutcome) -> None:
         """Record node completion data and persist checkpoint immediately."""
         node_checkpoint = self._ensure_node_checkpoint(node_id)
-        node_checkpoint.status = self._normalize_status(outcome.status)
+        node_checkpoint.status = _normalize_node_status(outcome.status)
         node_checkpoint.completed_at = self._utc_timestamp()
         summary = str(outcome.output_summary or "")
         node_checkpoint.output_summary = summary[:2000]
@@ -2006,7 +2026,7 @@ class CheckpointManager:
     def get_status_map(self) -> Dict[str, str]:
         """Return node status map from current checkpoint state."""
         return {
-            node_id: self._normalize_status(node_state.status)
+            node_id: _normalize_node_status(node_state.status)
             for node_id, node_state in self.state.nodes.items()
         }
 
@@ -2129,7 +2149,7 @@ class CheckpointManager:
                 artifacts = []
 
             parsed_nodes[str(node_id)] = NodeCheckpoint(
-                status=self._normalize_status(
+                status=_normalize_node_status(
                     node_data.get("status", NodeStatus.PENDING.value)
                 ),
                 started_at=self._optional_text(node_data.get("started_at")),
@@ -2212,13 +2232,6 @@ class CheckpointManager:
         if isinstance(value, Enum):
             return value.value
         return value
-
-    @staticmethod
-    def _normalize_status(status: Any) -> str:
-        """Normalize status-like values into lowercase strings."""
-        if isinstance(status, NodeStatus):
-            return status.value
-        return str(status).strip().lower()
 
     @staticmethod
     def _optional_text(value: Any) -> Optional[str]:
@@ -2398,7 +2411,7 @@ class StylesheetLoader:
             return None
 
         if "reasoning_effort" not in entry:
-            self.logger.warning(
+            self.logger.debug(
                 "Stylesheet entry '%s' missing optional field 'reasoning_effort'; defaulting to 'medium'",
                 entry_name,
             )
@@ -2407,17 +2420,17 @@ class StylesheetLoader:
         )
 
         if "tool_profile" not in entry:
-            self.logger.warning(
+            self.logger.debug(
                 "Stylesheet entry '%s' missing optional field 'tool_profile'; inferring from provider",
                 entry_name,
             )
         tool_profile = str(
-            entry.get("tool_profile", self._default_tool_profile(provider))
-        ).strip() or self._default_tool_profile(provider)
+            entry.get("tool_profile", _default_tool_profile(provider))
+        ).strip() or _default_tool_profile(provider)
 
         timeout_default = self._coerce_int(defaults.get("timeout"), 7200, "defaults.timeout")
         if "timeout" not in entry:
-            self.logger.warning(
+            self.logger.debug(
                 "Stylesheet entry '%s' missing optional field 'timeout'; defaulting to %d",
                 entry_name,
                 timeout_default,
@@ -2554,11 +2567,6 @@ class StylesheetLoader:
             "default": self._hardcoded_fallback(),
         }
         return classes
-
-    @staticmethod
-    def _default_tool_profile(provider: str) -> str:
-        """Infer tool profile from provider when omitted in stylesheet."""
-        return "codex" if provider.strip().lower() == "openai" else "claude"
 
     @staticmethod
     def _coerce_int(raw_value: Any, default: int, label: str) -> int:
@@ -3366,10 +3374,17 @@ def _build_invoke_command(
     tool_profile: str,
     model_name: str,
     reasoning_effort: str,
+    context_file: Optional[Path] = None,
+    use_stdin: bool = False,
 ) -> Tuple[List[str], str]:
     """Build a provider-native CLI command for agent invocation."""
     profile = str(tool_profile or "claude").strip().lower() or "claude"
     if profile == "claude":
+        if context_file is not None:
+            return (
+                ["claude", "--print", "--agent", agent_name, "--prompt-file", str(context_file)],
+                "claude",
+            )
         return (
             ["claude", "--print", "--agent", agent_name, "-p", context],
             "claude",
@@ -3380,7 +3395,9 @@ def _build_invoke_command(
         cmd = ["codex", "-m", resolved_model]
         if reasoning_effort != "medium":
             cmd.extend(["-c", f'model_reasoning_effort="{reasoning_effort}"'])
-        cmd.extend(["exec", "--full-auto", context])
+        cmd.extend(["exec", "--full-auto"])
+        if not use_stdin:
+            cmd.append(context if context_file is None else str(context_file))
         return (cmd, "codex")
 
     logger.warning(
@@ -3388,6 +3405,11 @@ def _build_invoke_command(
         profile,
         agent_name,
     )
+    if context_file is not None:
+        return (
+            ["claude", "--print", "--agent", agent_name, "--prompt-file", str(context_file)],
+            "claude",
+        )
     return (
         ["claude", "--print", "--agent", agent_name, "-p", context],
         "claude",
@@ -3433,14 +3455,41 @@ def invoke_agent(
         resolved_model,
         resolved_reasoning,
     ) = _resolve_invocation_config(tool_profile, model_config)
+    max_inline_context = 100000
+    context_file_path: Optional[Path] = None
+    use_stdin = False
+    stdin_stream = None
+
+    if len(context) > max_inline_context:
+        temp_dir = project_dir / "tasks"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        fd, temp_path = tempfile.mkstemp(
+            prefix=f"agent-{agent_name}-context-",
+            suffix=".txt",
+            dir=str(temp_dir),
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(context)
+        context_file_path = Path(temp_path)
+        use_stdin = resolved_profile in {"codex", "gpt"}
+
     cmd, cli_name = _build_invoke_command(
         agent_name,
         context,
         resolved_profile,
         resolved_model,
         resolved_reasoning,
+        context_file=context_file_path if (context_file_path and not use_stdin) else None,
+        use_stdin=use_stdin,
     )
-    command_for_logs = " ".join(cmd[:-1] + ["<context>"]) if cmd else "<unknown>"
+    if not cmd:
+        command_for_logs = "<unknown>"
+    elif use_stdin:
+        command_for_logs = " ".join(cmd) + " < <context-file>"
+    elif context_file_path is not None and resolved_profile == "claude":
+        command_for_logs = " ".join(cmd[:-1] + ["<prompt-file>"])
+    else:
+        command_for_logs = " ".join(cmd[:-1] + ["<context>"])
 
     logger.info(
         "Invoking agent '%s' with tool_profile='%s' model='%s' reasoning='%s' (timeout: %ds)",
@@ -3453,6 +3502,8 @@ def invoke_agent(
     start_time = time.monotonic()
 
     try:
+        if use_stdin and context_file_path is not None:
+            stdin_stream = context_file_path.open("r", encoding="utf-8")
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -3460,6 +3511,7 @@ def invoke_agent(
             timeout=timeout,
             cwd=str(project_dir),
             env=_agent_env(),
+            stdin=stdin_stream,
         )
     except subprocess.TimeoutExpired:
         elapsed = time.monotonic() - start_time
@@ -3491,6 +3543,14 @@ def invoke_agent(
             command=command_for_logs,
         )
         raise RuntimeError(message)
+    finally:
+        if stdin_stream is not None:
+            stdin_stream.close()
+        if context_file_path is not None:
+            try:
+                context_file_path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.debug("Failed to remove temp context file '%s': %s", context_file_path, exc)
 
     elapsed = time.monotonic() - start_time
     logger.info(
@@ -4017,6 +4077,7 @@ def _sprints_to_graph(
         edges.append(GraphEdge(source=source, target=target))
 
     previous_sequential_index: Optional[int] = None
+    leading_parallel_indices: List[int] = []
     pending_parallel_indices: List[int] = []
 
     for idx, is_parallel in enumerate(parallel_flags):
@@ -4027,10 +4088,17 @@ def _sprints_to_graph(
                 # Fan-out from the most recent sequential node.
                 add_edge(ordered_node_ids[previous_sequential_index], node_id)
                 pending_parallel_indices.append(idx)
+            else:
+                leading_parallel_indices.append(idx)
             continue
 
         # Current node is sequential.
-        if previous_sequential_index is not None:
+        if previous_sequential_index is None:
+            if leading_parallel_indices:
+                for parallel_idx in leading_parallel_indices:
+                    add_edge(ordered_node_ids[parallel_idx], node_id)
+                leading_parallel_indices = []
+        else:
             if pending_parallel_indices:
                 # Fan-in from all parallel nodes to this sequential node.
                 for parallel_idx in pending_parallel_indices:
@@ -4197,14 +4265,10 @@ def _normalize_node_status(status: Any) -> str:
 
 
 def _status_map_for_ready_nodes(status_map: Dict[str, str]) -> Dict[str, str]:
-    """Adapt checkpoint statuses so traversal can continue after failed nodes."""
+    """Normalize checkpoint statuses for graph traversal decisions."""
     converted: Dict[str, str] = {}
     for node_id, status in status_map.items():
-        normalized = _normalize_node_status(status)
-        if normalized in (NodeStatus.FAILED.value, NodeStatus.SKIPPED.value):
-            converted[node_id] = NodeStatus.COMPLETED.value
-        else:
-            converted[node_id] = normalized
+        converted[node_id] = _normalize_node_status(status)
     return converted
 
 
@@ -4669,6 +4733,8 @@ def _find_resumable_run_dir(tasks_dir: Path, graph_hash: str) -> Optional[Path]:
         reverse=True,
     )
     saw_checkpoint = False
+    saw_matching_hash = False
+    saw_terminal_match = False
 
     for run_dir in run_dirs:
         checkpoint_path = run_dir / "checkpoint.json"
@@ -4688,9 +4754,37 @@ def _find_resumable_run_dir(tasks_dir: Path, graph_hash: str) -> Optional[Path]:
 
         existing_hash = str(payload.get("graph_hash", "")).strip()
         if existing_hash and existing_hash == graph_hash:
+            saw_matching_hash = True
+            nodes_payload = payload.get("nodes", {})
+            node_statuses: List[str] = []
+            if isinstance(nodes_payload, dict):
+                for node_state in nodes_payload.values():
+                    if isinstance(node_state, dict):
+                        node_statuses.append(
+                            _normalize_node_status(
+                                node_state.get("status", NodeStatus.PENDING.value)
+                            )
+                        )
+                    else:
+                        node_statuses.append(NodeStatus.PENDING.value)
+
+            if node_statuses and all(
+                status in (
+                    NodeStatus.COMPLETED.value,
+                    NodeStatus.FAILED.value,
+                    NodeStatus.SKIPPED.value,
+                )
+                for status in node_statuses
+            ):
+                saw_terminal_match = True
+                continue
             return run_dir
 
-    if saw_checkpoint:
+    if saw_terminal_match:
+        logger.info(
+            "Detected matching run checkpoints but all are already terminal; starting a fresh run"
+        )
+    elif saw_checkpoint and not saw_matching_hash:
         logger.info(
             "Detected prior run checkpoints but none match current graph hash; "
             "starting a fresh run"
@@ -5042,6 +5136,8 @@ def run_orchestration(state: OrchestratorState) -> int:
 
             node_results: Dict[str, Dict[str, Any]] = {}
             node_outcomes: Dict[str, NodeOutcome] = {}
+            max_iterations = max(1, 3 * len(graph.nodes))
+            iteration_count = 0
 
             logger.info(
                 "%s",
@@ -5051,10 +5147,15 @@ def run_orchestration(state: OrchestratorState) -> int:
             # Graph traversal loop.
             while True:
                 check_shutdown(state)
+                iteration_count += 1
+                if iteration_count > max_iterations:
+                    logger.error("Graph traversal exceeded maximum iterations")
+                    return 1
 
                 status_map = checkpoint_manager.get_status_map()
                 ready_nodes = graph_engine.get_ready_nodes(
-                    _status_map_for_ready_nodes(status_map)
+                    _status_map_for_ready_nodes(status_map),
+                    outcome_map=node_outcomes,
                 )
                 all_nodes_complete = all(
                     _is_terminal_node_status(
