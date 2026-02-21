@@ -9,6 +9,34 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Project-scoped task directories: all orchestrator task paths now under `tasks/{slug}/` for multi-project isolation
+- `--project slug` CLI argument to orchestrator.py; auto-detected when single `tasks/*/OUTCOMES.md` found
+- `_project_tasks_dir(project_dir, slug)` helper as single path-resolution function in orchestrator.py
+- `_is_valid_project_slug(slug)` validator: `[a-z0-9]+(-[a-z0-9]+)*`, max 64 chars
+- `_find_project_slugs(tasks_dir)` scanner for auto-detection
+- PRD path confinement: validates paths stay within `tasks/{slug}/` scope
+- `/outcomes` Section 0: project slug resolution before any path use; startup scan for incomplete projects
+- `/outcomes` resume detection: scans `tasks/*/outcomes/setup.xml` on startup
+- `/outcomes` legacy detection: warns if `tasks/outcomes-setup.xml` exists, offers migration
+- `/orchestrate` slug detection: scans `tasks/*/OUTCOMES.md` with find, auto-selects or prompts user
+- Orchestrator archive: moves `tasks/{slug}/` as a unit to `tasks/archive/{slug}-{date}/` on completion
+- execute.md: skip archive prompt when running under orchestration (`SPRINT_PRD` context present)
+
+### Changed
+- All node handlers (SoftwareHandler, ContentHandler, DiscoveryHandler) accept `project_slug` param
+- PM agent derives all paths from `OUTCOMES_PATH`/`ROADMAP_PATH` context vars (no hardcoded `tasks/`)
+- PL agent derives all paths from `dirname("$SPRINT_PRD")` (no hardcoded `tasks/{sprint-name}/`)
+- PL log file path: `$(dirname "$SPRINT_PRD")/pl-session.log` (was `tasks/{SPRINT_NAME}/pl-session.log`)
+- PL task.xml path: `$(dirname "$SPRINT_PRD")/task.xml` (was `tasks/{sprint-name}/task.xml`)
+- /outcomes state file: `tasks/{slug}/outcomes/setup.xml` (was `tasks/outcomes-setup.xml`)
+- /orchestrate launch: passes `--project {slug}` to orchestrator.py
+- Orchestrator log: `tasks/{slug}/orchestrator.log` (was `tasks/orchestrator.log`)
+- tasks/ filesystem: cleaned up stale files (prd-sync-command-agent-system.md, tasks-sync-command-agent-system.md, prd-templating-system.md, archive/cto-command-integration/)
+
+### Fixed
+- Code review findings: path safety (PRD confinement), archive logic, edge cases in orchestrator.py
+
+### Added
 - Graph Engine Core: DAG-based execution engine replacing linear PM-PL orchestration in orchestrator.py
 - GraphNode, GraphEdge, Graph, NodeOutcome, ModelConfig, CheckpointState, NodeCheckpoint data models
 - NodeType enum: TASK, DISCOVERY, GATE, FAN_OUT, FAN_IN

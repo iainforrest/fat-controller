@@ -1,7 +1,7 @@
 {
   "meta": {
     "projectName": "fat-controller",
-    "version": "4.0.0",
+    "version": "4.1.0",
     "lastUpdated": "2026-02-21",
     "description": "Business logic, feature specifications, and product requirements"
   },
@@ -147,6 +147,26 @@
         "Two-phase merge with conflict detection"
       ]
     },
+    "projectScopedTaskDirs": {
+      "status": "complete",
+      "version": "v4.1.0",
+      "description": "All orchestrator task paths scoped under tasks/{slug}/ for multi-project isolation. Slug derived from project name, passed via --project CLI arg.",
+      "keyComponents": [
+        "--project slug CLI argument added to orchestrator.py",
+        "_project_tasks_dir(project_dir, slug) helper resolves all task paths",
+        "_is_valid_project_slug(slug): [a-z0-9]+(-[a-z0-9]+)*, max 64 chars",
+        "_find_project_slugs(tasks_dir) scans tasks/*/OUTCOMES.md for auto-detection",
+        "PM agent derives paths from OUTCOMES_PATH/ROADMAP_PATH context vars (no hardcoded tasks/)",
+        "PL agent derives all paths from dirname(SPRINT_PRD) (no hardcoded tasks/{name}/)",
+        "/orchestrate command detects slug via find tasks -mindepth 2 -maxdepth 2 -name OUTCOMES.md",
+        "/outcomes command derives slug from project name (ask Q1), creates tasks/{slug}/",
+        "Outcomes setup state at tasks/{slug}/outcomes/setup.xml (was tasks/outcomes-setup.xml)",
+        "Red-team artifacts at tasks/{slug}/outcomes/red-team/",
+        "Orchestrator log at tasks/{slug}/orchestrator.log (was tasks/orchestrator.log)",
+        "Archive moves tasks/{slug}/ as unit to tasks/archive/{slug}-{date}/",
+        "Path confinement: PRD paths validated to stay within tasks/{slug}/"
+      ]
+    },
     "valuesDrivenAgents": {
       "status": "complete",
       "version": "v3.3.0",
@@ -205,15 +225,21 @@
     },
     "outcomesV2": {
       "status": "complete",
-      "version": "v4.0.0",
-      "description": "Full rewrite of /outcomes command with 6-phase state machine, XML phase tracking, resumability, and parallel red-team dispatch",
+      "version": "v4.1.0",
+      "description": "Full rewrite of /outcomes command with project slug, 6-phase state machine, XML phase tracking, resumability, and parallel red-team dispatch",
       "keyComponents": [
+        "Section 0: project slug resolution before any path use",
+        "Slug derived from project name: lowercase, strip specials, collapse to hyphens",
+        "All paths under tasks/{slug}/: outcomes/setup.xml, outcomes/red-team/, OUTCOMES.md",
+        "Startup scan: finds tasks/*/outcomes/setup.xml to detect incomplete projects",
+        "Resume: jump to first incomplete phase for an existing project",
+        "Legacy detection: warns if tasks/outcomes-setup.xml exists, offers migration",
         "6 phases: discovery, red-team, synthesis, context, refinement, finalize",
         "XML state tracking for per-phase resumability",
         "Parallel red-team dispatch: multiple agents challenge outcomes concurrently",
         "Interactive refinement round until stopping criteria met",
         "Auto-archiving of completed project artifacts on successful orchestrator exit",
-        "Creates OUTCOMES.md, PROJECT_STATE.md, DECISIONS.md on finalize"
+        "Creates tasks/{slug}/OUTCOMES.md, PROJECT_STATE.md, DECISIONS.md on finalize"
       ]
     },
     "projectLeadAgent": {

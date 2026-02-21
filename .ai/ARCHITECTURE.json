@@ -1,7 +1,7 @@
 {
   "meta": {
     "projectName": "fat-controller",
-    "version": "4.0.0",
+    "version": "4.1.0",
     "lastUpdated": "2026-02-21",
     "description": "Architecture patterns, data flows, and component relationships"
   },
@@ -130,20 +130,24 @@
       ]
     },
     "autonomousOrchestration": {
-      "description": "Python orchestrator drives PM-PL autonomous execution cycles",
+      "description": "Python orchestrator drives PM-PL autonomous execution cycles, scoped to a named project slug",
       "keyFiles": ["orchestrator.py", ".claude/agents/pm.md", ".claude/agents/pl.md", "templates/ROADMAP.md"],
       "constraints": [
         "Python 3 stdlib only (no pip dependencies)",
         "Filesystem is truth, sessions are disposable",
         "PM plans, PL executes, orchestrator loops",
-        "YAML signals between ---ORCHESTRATOR_SIGNAL--- markers"
+        "YAML signals between ---ORCHESTRATOR_SIGNAL--- markers",
+        "--project slug required when multiple projects exist under tasks/",
+        "project_slug must match [a-z0-9]+(-[a-z0-9]+)*, max 64 chars",
+        "All task paths resolve via _project_tasks_dir(project_dir, project_slug)"
       ],
       "benefits": [
         "Autonomous PM-PL cycles without human intervention",
-        "Structured state tracking in ROADMAP.md",
+        "Project-scoped task directories: tasks/{slug}/ isolates per-project state",
         "Parallel PL execution for independent sprints",
         "VALUES.md driven with graduated warning (not gate)",
-        "Git branch per sprint with merge conflict handling"
+        "Git branch per sprint with merge conflict handling",
+        "Archive moves tasks/{slug}/ as a unit on successful completion"
       ]
     },
     "valuesDrivenAgentBoot": {
@@ -339,26 +343,31 @@
       "dataModel": "Topic → Brief → 3 rounds (independent + cross-exam) → Synthesis → Actionable recommendations"
     },
     "autonomousOrchestratorFlow": {
-      "name": "Autonomous PM-PL execution cycle with git branch management and parallel execution",
+      "name": "Autonomous PM-PL execution cycle with project-scoped paths, git branch management, and parallel execution",
       "steps": [
-        "Orchestrator reads tasks/ROADMAP.md (sprint state)",
+        "Orchestrator receives --project slug (auto-detected if only one project exists)",
+        "_project_tasks_dir(project_dir, slug) resolves to tasks/{slug}/ for all paths",
+        "Orchestrator reads tasks/{slug}/ROADMAP.md (sprint state)",
         "Invoke PM agent (claude --print --agent pm) to plan next sprint(s)",
-        "PM signals next_task or parallel_tasks with sprint details",
+        "PM receives OUTCOMES_PATH and ROADMAP_PATH as absolute paths in context",
+        "PM signals next_task or parallel_tasks with sprint details (prd at tasks/{slug}/{sprint}/prd.md)",
         "Orchestrator creates git branch sprint/{sprint-name}",
-        "Invoke PL agent (claude --print --agent pl) on branch with sprint PRD",
+        "Invoke PL agent (claude --print --agent pl) on branch with SPRINT_PRD pointing to tasks/{slug}/{sprint}/prd.md",
+        "PL derives all paths from SPRINT_PRD (dirname for log and task.xml)",
         "PL runs TaskGen → Execute → commits code → merges to main",
         "PL signals sprint_result (success/error) with summary",
         "Orchestrator updates ROADMAP.md with sprint status",
+        "On PM completed signal: archive tasks/{slug}/ to tasks/archive/{slug}-{date}/",
         "Loop: repeat PM → PL cycle until PM signals completed or blocked"
       ],
       "keyFiles": [
         "orchestrator.py",
         ".claude/agents/pm.md",
         ".claude/agents/pl.md",
-        "tasks/ROADMAP.md",
-        "tasks/OUTCOMES.md"
+        "tasks/{slug}/ROADMAP.md",
+        "tasks/{slug}/OUTCOMES.md"
       ],
-      "dataModel": "SprintState (name, target_outcome, status, prd_path, branch, pl_summary)"
+      "dataModel": "SprintState (name, target_outcome, status, prd_path, branch, pl_summary) — prd_path under tasks/{slug}/{sprint}/"
     },
     "valuesDrivenBootFlow": {
       "name": "Values loading with graduated warning and graceful degradation",
@@ -380,14 +389,15 @@
       "dataModel": "VALUES.md (optional, user-specific values profile)"
     },
     "orchestrateCommandFlow": {
-      "name": "Orchestrate command pre-flight and tmux launch workflow",
+      "name": "Orchestrate command project-slug detection, pre-flight, and tmux launch workflow",
       "steps": [
         "User invokes /orchestrate command",
         "Check 1: git repository exists",
-        "Check 2: tasks/OUTCOMES.md exists (redirect to /outcomes if missing)",
+        "Check 2: Scan tasks/*/OUTCOMES.md (exclude tasks/archive/) to detect project slugs",
+        "If 0 found: redirect to /outcomes. If 1 found: auto-detect slug. If >1: ask user to choose.",
         "Check 3: ~/.claude/VALUES.md exists (graduated warning, allow proceed)",
         "Check 4: tmux session 'orchestrator' exists (attach/kill/cancel)",
-        "Launch: tmux new-session -d -s orchestrator with orchestrator.py",
+        "Launch: tmux new-session -d -s orchestrator with orchestrator.py --project {slug}",
         "Verify: tmux session started successfully",
         "Return: provide attach/monitor/shutdown instructions",
         "Session runs independently in background"
@@ -395,33 +405,34 @@
       "keyFiles": [
         ".claude/commands/orchestrate.md",
         "orchestrator.py",
-        "tasks/OUTCOMES.md"
+        "tasks/{slug}/OUTCOMES.md"
       ],
-      "dataModel": "Tmux session running orchestrator.py → tasks/orchestrator.log"
+      "dataModel": "Tmux session running orchestrator.py --project {slug} → tasks/{slug}/orchestrator.log"
     },
     "outcomesCommandFlow": {
-      "name": "Outcomes command interactive discovery and state file initialization",
+      "name": "Outcomes v2 command with project slug resolution, phase-state resumability, and project-scoped paths",
       "steps": [
         "User invokes /outcomes command",
-        "Idempotency gate: check if OUTCOMES.md exists (review/fresh/cancel)",
-        "Discovery Round 1: open context gathering (1 question)",
-        "Discovery Round 2: extract and propose outcomes (1-3 questions)",
-        "Discovery Round 3+: refinement until stopping criteria met",
-        "Confirmation: summarize outcomes and wait for approval",
-        "Create tasks/OUTCOMES.md (or overwrite if fresh start)",
-        "Create tasks/PROJECT_STATE.md (if missing)",
-        "Create tasks/DECISIONS.md (if missing)",
-        "Optional: add Project Lead section to CLAUDE.md",
+        "Section 0: Scan tasks/*/outcomes/setup.xml for incomplete projects (exclude tasks/archive/)",
+        "If incomplete projects found: offer to resume; set slug and jump to incomplete phase",
+        "Check for legacy tasks/outcomes-setup.xml; offer migration to archive",
+        "New project: ask project name (Round 1, Q1), derive slug as [a-z0-9]+(-[a-z0-9]+)*",
+        "Create directories: mkdir -p tasks/{slug}/outcomes/red-team/",
+        "Persist slug; all paths use tasks/{slug}/ prefix",
+        "Phase 1 discovery → Phase 2 red-team → Phase 3 synthesis → Phase 4 context → Phase 5 refinement → Phase 6 finalize",
+        "XML phase tracking in tasks/{slug}/outcomes/setup.xml enables resume from any phase",
+        "Finalize: create tasks/{slug}/OUTCOMES.md, tasks/{slug}/PROJECT_STATE.md, tasks/{slug}/DECISIONS.md",
         "Offer to run /orchestrate command"
       ],
       "keyFiles": [
         ".claude/commands/outcomes.md",
-        "tasks/OUTCOMES.md",
-        "tasks/PROJECT_STATE.md",
-        "tasks/DECISIONS.md",
-        "CLAUDE.md"
+        "tasks/{slug}/outcomes/setup.xml",
+        "tasks/{slug}/outcomes/red-team/",
+        "tasks/{slug}/OUTCOMES.md",
+        "tasks/{slug}/PROJECT_STATE.md",
+        "tasks/{slug}/DECISIONS.md"
       ],
-      "dataModel": "Interactive Q&A → OUTCOMES.md + state files → optional orchestrate launch"
+      "dataModel": "Interactive Q&A → XML phase state at tasks/{slug}/outcomes/setup.xml → OUTCOMES.md + state files → optional orchestrate launch"
     },
     "graphEngineExecutionFlow": {
       "name": "Graph engine node execution with checkpointing and domain handlers",

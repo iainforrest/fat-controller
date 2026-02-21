@@ -583,19 +583,25 @@ Python orchestrator drives PM-PL cycles for autonomous project execution.
 ```
 orchestrator.py (Python, stdlib-only)
     ↓
-Read ROADMAP.md (sprint state)
+Resolve project slug (--project flag, or auto-detect via tasks/*/OUTCOMES.md)
     ↓
-Invoke PM agent (claude --print --agent pm)
+_project_tasks_dir(project_dir, slug) = tasks/{slug}/
     ↓
-PM signals next_task or parallel_tasks
+Read tasks/{slug}/ROADMAP.md (sprint state)
+    ↓
+Invoke PM agent with OUTCOMES_PATH and ROADMAP_PATH as absolute context vars
+    ↓
+PM signals next_task or parallel_tasks (PRDs at tasks/{slug}/{sprint}/prd.md)
     ↓
 For each sprint:
     - Create git branch sprint/{sprint-name}
-    - Invoke PL agent (claude --print --agent pl)
+    - Invoke PL agent with SPRINT_PRD=tasks/{slug}/{sprint}/prd.md
+    - PL derives all paths from dirname("$SPRINT_PRD")
     - PL: TaskGen → Execute → commit → merge
     - PL signals sprint_result (success/error)
-    - Update ROADMAP.md with status
+    - Update tasks/{slug}/ROADMAP.md with status
     ↓
+On PM completed: archive tasks/{slug}/ → tasks/archive/{slug}-{date}/
 Loop until PM signals completed or blocked
 ```
 
@@ -605,36 +611,43 @@ Loop until PM signals completed or blocked
 - Python 3 stdlib only (no pip dependencies)
 - Filesystem is truth, sessions are disposable
 - Structured signal parsing (YAML blocks)
+- `--project slug` CLI arg; auto-detected from `tasks/*/OUTCOMES.md` if one project
+- `_project_tasks_dir(project_dir, slug)` is the single path-resolution helper
+- Slug constraint: `[a-z0-9]+(-[a-z0-9]+)*`, max 64 chars
 - Git branch management per sprint
 - Parallel PL execution for independent sprints
 - Two-phase merge (--no-commit, then commit or abort)
 
 **PM Agent (.claude/agents/pm.md):**
-- Plans sprints from OUTCOMES.md and ROADMAP.md
-- Writes just-in-time PRDs
+- Plans sprints from OUTCOMES_PATH and ROADMAP_PATH (absolute paths in context)
+- Writes just-in-time PRDs to `dirname(ROADMAP_PATH)/{sprint}/prd.md`
+- Never hardcodes `tasks/` — paths always derived from context vars
 - Outputs structured signals (next_task, parallel_tasks, completed, blocked, halt)
 - Values-driven planning decisions
 
 **PL Agent (.claude/agents/pl.md):**
-- Executes sprints on git branches
+- Receives SPRINT_PRD as absolute path; derives ALL paths via `dirname("$SPRINT_PRD")`
+- Log file: `$(dirname "$SPRINT_PRD")/pl-session.log`
+- Task XML: `$(dirname "$SPRINT_PRD")/task.xml`
 - Runs TaskGen → Execute → commits
 - Outputs sprint_result signals
 - Values-driven execution decisions
 
-**ROADMAP.md (tasks/ROADMAP.md):**
+**ROADMAP.md (tasks/{slug}/ROADMAP.md):**
 - Single source of truth for sprint state
 - Fields: sprint name, target outcome, status, PRD path, branch, summary
 - Updated by PM and orchestrator
 
 ### Implementation Checklist
-- [ ] Create tasks/OUTCOMES.md defining project outcomes
-- [ ] Run orchestrator: `python3 orchestrator.py /path/to/project`
+- [ ] Run /outcomes to create `tasks/{slug}/OUTCOMES.md` (derives slug from project name)
+- [ ] Run /orchestrate (auto-detects slug via `find tasks -mindepth 2 -maxdepth 2 -name OUTCOMES.md`)
+- [ ] /orchestrate passes `--project {slug}` to orchestrator.py
 - [ ] Orchestrator checks for VALUES.md (graduated warning if missing)
-- [ ] PM creates/updates ROADMAP.md with sprint plan
-- [ ] PM signals next sprint(s) to execute
+- [ ] PM creates/updates `tasks/{slug}/ROADMAP.md` with sprint plan
+- [ ] PM signals next sprint(s); PRDs at `tasks/{slug}/{sprint}/prd.md`
 - [ ] Orchestrator creates sprint/* branches
-- [ ] PL executes sprints, commits code, signals results
-- [ ] Orchestrator updates ROADMAP.md with status
+- [ ] PL executes sprints with paths from SPRINT_PRD, commits code, signals results
+- [ ] Orchestrator archives `tasks/{slug}/` on PM completed signal
 - [ ] Loop continues until PM signals completed or blocked
 
 ### Error Handling
@@ -643,6 +656,7 @@ Loop until PM signals completed or blocked
 - **Git merge conflict**: Abort merge, mark sprint as blocked, notify user
 - **Stuck detection**: Same sprint name 3 times in sequence → halt
 - **SIGINT (Ctrl+C)**: Graceful shutdown, preserve state in ROADMAP.md
+- **Invalid slug**: Halt with error explaining slug format constraint
 
 ### Graduated Warning Flow (VALUES.md)
 ```
@@ -813,7 +827,7 @@ action: next_task | parallel_tasks | completed | blocked | halt | sprint_result
 action: next_task
 sprint_name: "auth-service"
 target_outcome: "User Authentication"
-prd_path: "tasks/prd-auth-service.md"
+prd_path: "tasks/{slug}/auth-service/prd.md"
 branch: "sprint/auth-service"
 ---ORCHESTRATOR_SIGNAL---
 ```
@@ -825,11 +839,11 @@ action: parallel_tasks
 sprints:
   - sprint_name: "api-layer"
     target_outcome: "API Foundation"
-    prd_path: "tasks/prd-api-layer.md"
+    prd_path: "tasks/{slug}/api-layer/prd.md"
     branch: "sprint/api-layer"
   - sprint_name: "db-schema"
     target_outcome: "Data Persistence"
-    prd_path: "tasks/prd-db-schema.md"
+    prd_path: "tasks/{slug}/db-schema/prd.md"
     branch: "sprint/db-schema"
 ---ORCHESTRATOR_SIGNAL---
 ```

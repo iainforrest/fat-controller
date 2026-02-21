@@ -4,7 +4,8 @@
     "lastUpdated": "2026-02-21",
     "totalFiles": 52,
     "description": "Smart file index with cross-references and quick navigation",
-    "lineNumberPolicy": "Use globs or directories instead of file:line references."
+    "lineNumberPolicy": "Use globs or directories instead of file:line references.",
+    "pathConvention": "All orchestrator task paths are project-scoped: tasks/{slug}/. Slug: [a-z0-9]+(-[a-z0-9]+)*, max 64 chars."
   },
   "byPurpose": {
     "_comment": "Organize files by their functional purpose",
@@ -107,9 +108,11 @@
       "orchestrator": ["orchestrator.py"],
       "modelStylesheet": ["model-stylesheet.yaml"],
       "agents": [".claude/agents/pm.md", ".claude/agents/pl.md", ".claude/agents/discovery.md", ".claude/agents/project-lead.md"],
-      "stateFiles": ["tasks/ROADMAP.md", "tasks/OUTCOMES.md", "tasks/PROJECT_STATE.md", "tasks/DECISIONS.md"],
+      "stateFiles": ["tasks/{slug}/ROADMAP.md", "tasks/{slug}/OUTCOMES.md", "tasks/{slug}/PROJECT_STATE.md", "tasks/{slug}/DECISIONS.md"],
+      "outcomesSetup": ["tasks/{slug}/outcomes/setup.xml", "tasks/{slug}/outcomes/red-team/"],
       "templates": ["templates/ROADMAP.md"],
-      "commands": [".claude/commands/outcomes.md", ".claude/commands/orchestrate.md", ".claude/commands/lead.md"]
+      "commands": [".claude/commands/outcomes.md", ".claude/commands/orchestrate.md", ".claude/commands/lead.md"],
+      "_note": "All task paths are project-scoped: tasks/{slug}/ where slug=[a-z0-9]+(-[a-z0-9]+)*"
     }
   },
   "byLayer": {
@@ -197,21 +200,26 @@
     },
     "orchestrator.py": {
       "invokes": [".claude/agents/pm.md", ".claude/agents/pl.md"],
-      "reads": ["tasks/ROADMAP.md", "tasks/OUTCOMES.md", "~/.claude/VALUES.md"],
-      "writes": ["tasks/ROADMAP.md", ".claude-orchestrator/orchestrator.log"],
+      "reads": ["tasks/{slug}/ROADMAP.md", "tasks/{slug}/OUTCOMES.md", "~/.claude/VALUES.md"],
+      "writes": ["tasks/{slug}/ROADMAP.md", ".claude-orchestrator/orchestrator.log"],
       "signals": ["YAML blocks between ---ORCHESTRATOR_SIGNAL--- markers"],
-      "gitOperations": ["branch creation (sprint/*)", "checkout", "merge --no-commit", "merge abort on conflict"]
+      "gitOperations": ["branch creation (sprint/*)", "checkout", "merge --no-commit", "merge abort on conflict"],
+      "cliArgs": ["--project slug (required when multiple projects; auto-detected if one)"],
+      "pathHelpers": ["_project_tasks_dir(project_dir, slug)", "_is_valid_project_slug(slug)", "_find_project_slugs(tasks_dir)"],
+      "archiveBehavior": "On PM completed signal: moves tasks/{slug}/ to tasks/archive/{slug}-{date}/"
     },
     ".claude/agents/pm.md": {
-      "uses": ["~/.claude/VALUES.md", "tasks/OUTCOMES.md", "tasks/ROADMAP.md"],
-      "outputs": ["tasks/ROADMAP.md", "tasks/prd-{sprint}.md", "YAML signals (next_task, parallel_tasks, completed, blocked, halt)"],
-      "invokedBy": ["orchestrator.py"]
+      "uses": ["~/.claude/VALUES.md", "OUTCOMES_PATH (absolute, passed by orchestrator)", "ROADMAP_PATH (absolute, passed by orchestrator)"],
+      "outputs": ["tasks/{slug}/ROADMAP.md", "tasks/{slug}/{sprint}/prd.md", "YAML signals (next_task, parallel_tasks, completed, blocked, halt)"],
+      "invokedBy": ["orchestrator.py"],
+      "_note": "Paths derived from OUTCOMES_PATH/ROADMAP_PATH context vars, never hardcoded tasks/"
     },
     ".claude/agents/pl.md": {
-      "uses": ["~/.claude/VALUES.md", "tasks/prd-{sprint}.md"],
+      "uses": ["~/.claude/VALUES.md", "SPRINT_PRD (absolute path, passed by orchestrator)"],
       "invokes": [".claude/commands/TaskGen.md", ".claude/commands/execute.md"],
-      "outputs": ["YAML signals (sprint_result with success/error)", "git commits on sprint/* branch"],
-      "invokedBy": ["orchestrator.py"]
+      "outputs": ["$(dirname SPRINT_PRD)/pl-session.log", "$(dirname SPRINT_PRD)/task.xml", "YAML signals (sprint_result with success/error)", "git commits on sprint/* branch"],
+      "invokedBy": ["orchestrator.py"],
+      "_note": "All paths derived from SPRINT_PRD via dirname, never hardcoded tasks/{sprint-name}/"
     },
     ".claude/commands/values-discovery.md": {
       "outputs": ["~/.claude/VALUES.md"],
@@ -222,34 +230,36 @@
       "usedBy": [".claude/agents/cto.md", ".claude/agents/pm.md", ".claude/agents/pl.md"]
     },
     ".claude/commands/outcomes.md": {
-      "outputs": ["tasks/OUTCOMES.md", "tasks/PROJECT_STATE.md", "tasks/DECISIONS.md"],
+      "outputs": ["tasks/{slug}/OUTCOMES.md", "tasks/{slug}/PROJECT_STATE.md", "tasks/{slug}/DECISIONS.md", "tasks/{slug}/outcomes/setup.xml"],
       "optionalOutputs": ["CLAUDE.md (Project Lead section)"],
       "references": ["~/.claude/agents/project-lead.md"],
-      "invokes": [".claude/commands/orchestrate.md (optional)"]
+      "invokes": [".claude/commands/orchestrate.md (optional)"],
+      "slugDerivation": "Project name → lowercase, strip specials, collapse to hyphens, trim → [a-z0-9]+(-[a-z0-9]+)*"
     },
     ".claude/commands/orchestrate.md": {
-      "uses": ["tasks/OUTCOMES.md", "~/.claude/VALUES.md (optional)"],
-      "invokes": ["orchestrator.py"],
-      "prerequisites": ["git repository", "tasks/OUTCOMES.md"],
+      "uses": ["tasks/*/OUTCOMES.md (scanned to detect slugs)", "~/.claude/VALUES.md (optional)"],
+      "invokes": ["orchestrator.py --project {slug}"],
+      "prerequisites": ["git repository", "tasks/{slug}/OUTCOMES.md"],
       "tmuxSession": "orchestrator",
-      "outputs": ["tasks/orchestrator.log"]
+      "outputs": ["tasks/{slug}/orchestrator.log"],
+      "slugDetection": "find tasks -mindepth 2 -maxdepth 2 -name OUTCOMES.md ! -path tasks/archive/*"
     },
     ".claude/commands/lead.md": {
       "loads": ["~/.claude/agents/project-lead.md"],
-      "uses": ["tasks/OUTCOMES.md", "tasks/PROJECT_STATE.md", "tasks/DECISIONS.md", ".ai/QUICK.md"],
+      "uses": ["tasks/{slug}/OUTCOMES.md", "tasks/{slug}/PROJECT_STATE.md", "tasks/{slug}/DECISIONS.md", ".ai/QUICK.md"],
       "invokes": [".claude/commands/prd.md", ".claude/commands/TaskGen.md", ".claude/commands/execute.md"],
-      "outputs": ["tasks/PROJECT_STATE.md", "tasks/DECISIONS.md"],
-      "prerequisites": ["tasks/OUTCOMES.md", "~/.claude/agents/project-lead.md"]
+      "outputs": ["tasks/{slug}/PROJECT_STATE.md", "tasks/{slug}/DECISIONS.md"],
+      "prerequisites": ["tasks/{slug}/OUTCOMES.md", "~/.claude/agents/project-lead.md"]
     },
     ".claude/agents/project-lead.md": {
-      "uses": ["~/.claude/VALUES.md", "tasks/OUTCOMES.md", "tasks/PROJECT_STATE.md", "tasks/DECISIONS.md"],
+      "uses": ["~/.claude/VALUES.md", "tasks/{slug}/OUTCOMES.md", "tasks/{slug}/PROJECT_STATE.md", "tasks/{slug}/DECISIONS.md"],
       "invokes": [".claude/commands/prd.md", ".claude/commands/TaskGen.md", ".claude/commands/execute.md", ".claude/agents/cto.md"],
-      "outputs": ["tasks/PROJECT_STATE.md", "tasks/DECISIONS.md", "sprint deliverables"],
+      "outputs": ["tasks/{slug}/PROJECT_STATE.md", "tasks/{slug}/DECISIONS.md", "sprint deliverables"],
       "invokedBy": [".claude/commands/lead.md"]
     },
     ".claude/agents/discovery.md": {
       "uses": ["~/.claude/VALUES.md"],
-      "outputs": ["tasks/{node-id}/CONTEXT.md", "YAML signal (done|blocked|error)"],
+      "outputs": ["tasks/{slug}/{node-id}/CONTEXT.md", "YAML signal (done|blocked|error)"],
       "invokedBy": ["orchestrator.py (DiscoveryHandler)"],
       "modes": ["simple (quick approach assessment)", "complex (investigation + debate)"]
     },

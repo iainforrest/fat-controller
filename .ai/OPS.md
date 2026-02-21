@@ -40,8 +40,9 @@
 [CLEAN_BUILD]                # e.g., "npm run clean && npm run build"
 
 # Autonomous Orchestrator
-python3 orchestrator.py /path/to/project [--max-cycles 50] [--log-level INFO] [--skip-values-check]
-# Drives autonomous PM-PL cycles
+python3 orchestrator.py /path/to/project --project {slug} [--max-cycles 50] [--log-level INFO] [--skip-values-check]
+# --project: project slug (auto-detected if only one tasks/*/OUTCOMES.md exists)
+# Drives autonomous PM-PL cycles scoped to tasks/{slug}/
 # Logs to .claude-orchestrator/orchestrator.log
 # Ctrl+C for graceful shutdown
 # --skip-values-check: skip VALUES.md prompts (used by /orchestrate command)
@@ -243,24 +244,27 @@ When you discover a new operational procedure, add it here using this format:
 **Start orchestrator:**
 ```bash
 cd /path/to/project
-python3 orchestrator.py . --max-cycles 50 --log-level INFO
+python3 orchestrator.py . --project {slug} --max-cycles 50 --log-level INFO
+# slug auto-detected if only one tasks/*/OUTCOMES.md exists
 ```
 
 **Prerequisites:**
-- [ ] tasks/OUTCOMES.md exists with defined outcomes
+- [ ] tasks/{slug}/OUTCOMES.md exists (created by /outcomes command)
 - [ ] ~/.claude/VALUES.md exists (recommended, not required)
 - [ ] Git working directory clean (no uncommitted changes)
 - [ ] Git remote configured (for push operations)
 
 **Orchestrator will:**
-1. Check for VALUES.md (graduated warning if missing, user can proceed)
-2. Read or create tasks/ROADMAP.md
-3. Invoke PM agent to plan next sprint(s)
-4. Create sprint/* git branches
-5. Invoke PL agent(s) to execute sprint(s)
-6. Merge completed sprints to main
-7. Update ROADMAP.md with status
-8. Loop until PM signals completed or blocked
+1. Resolve project slug (--project arg or auto-detect from tasks/*/OUTCOMES.md)
+2. Check for VALUES.md (graduated warning if missing, user can proceed)
+3. Read or create tasks/{slug}/ROADMAP.md
+4. Invoke PM agent with OUTCOMES_PATH and ROADMAP_PATH as absolute context vars
+5. Create sprint/* git branches
+6. Invoke PL agent(s) with SPRINT_PRD=tasks/{slug}/{sprint}/prd.md
+7. Merge completed sprints to main
+8. Update tasks/{slug}/ROADMAP.md with status
+9. On PM completed: archive tasks/{slug}/ → tasks/archive/{slug}-{date}/
+10. Loop until PM signals completed or blocked
 
 **Logs:**
 - Structured logs: `.claude-orchestrator/orchestrator.log`
@@ -308,9 +312,9 @@ tmux kill-session -t orchestrator
 #### Issue: PM signals "blocked" - OUTCOMES.md missing
 **Symptoms**: Orchestrator halts immediately after PM invocation
 **Resolution**:
-1. Create tasks/OUTCOMES.md with project outcomes
-2. Use template or run /outcomes command
-3. Re-run orchestrator
+1. Run /outcomes to create `tasks/{slug}/OUTCOMES.md` (slug derived from project name)
+2. Re-run /orchestrate (auto-detects slug)
+3. Or: `python3 orchestrator.py . --project {slug}`
 
 #### Issue: PL execution fails - git merge conflict
 **Symptoms**: Orchestrator logs "Merge conflict detected, aborting merge"
