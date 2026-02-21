@@ -1,7 +1,7 @@
 {
   "meta": {
     "projectName": "fat-controller",
-    "version": "4.1.0",
+    "version": "4.2.0",
     "lastUpdated": "2026-02-21",
     "description": "Business logic, feature specifications, and product requirements"
   },
@@ -266,6 +266,21 @@
         "Outputs tasks/{node-id}/CONTEXT.md with approach, rationale, constraints",
         "ORCHESTRATOR_SIGNAL: done|blocked|error with context_path and complexity_used",
         "Invoked by orchestrator.py DiscoveryHandler"
+      ]
+    },
+    "devToProductionSync": {
+      "status": "complete",
+      "version": "v4.2.0",
+      "description": "Two-tier sync architecture: fat-controller is the authoritative dev source; git hooks auto-push .claude/ content to ~/.claude/ on master commits. Replaced three-tier system (fat-controller → ~/projects/.claude/ → ~/.claude/).",
+      "keyComponents": [
+        "scripts/sync-to-root.sh: copies commands, agents, skills *.md to ~/.claude/",
+        ".git/hooks/post-commit: triggers sync on every master branch commit",
+        ".git/hooks/post-merge: triggers sync on master branch pull/merge",
+        "Additive-only sync: destination root-only content (entities/) preserved",
+        "execution-agent.md added to fat-controller .claude/agents/ (was missing)",
+        "Removed ~/projects/.claude/ intermediate layer",
+        "Removed symlinks from 10 downstream projects",
+        "Moved ~/projects/.claude/skills/entities/ to ~/.claude/skills/entities/"
       ]
     },
     "_example": {

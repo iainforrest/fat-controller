@@ -2,7 +2,7 @@
   "meta": {
     "projectName": "fat-controller",
     "lastUpdated": "2026-02-21",
-    "totalFiles": 52,
+    "totalFiles": 54,
     "description": "Smart file index with cross-references and quick navigation",
     "lineNumberPolicy": "Use globs or directories instead of file:line references.",
     "pathConvention": "All orchestrator task paths are project-scoped: tasks/{slug}/. Slug: [a-z0-9]+(-[a-z0-9]+)*, max 64 chars."
@@ -36,6 +36,7 @@
         ".claude/agents/task-writer.md",
         ".claude/agents/update-memory-agent.md",
         ".claude/agents/code-review-agent.md",
+        ".claude/agents/execution-agent.md",
         ".claude/agents/cto.md",
         ".claude/agents/pm.md",
         ".claude/agents/pl.md",
@@ -103,6 +104,11 @@
         "templates/ROADMAP.md",
         "templates/CLAUDE.md"
       ]
+    },
+    "syncScripts": {
+      "sync": ["scripts/sync-to-root.sh"],
+      "hooks": [".git/hooks/post-commit", ".git/hooks/post-merge"],
+      "_note": "Git hooks not tracked by git. sync-to-root.sh copies .claude/{commands,agents,skills}/*.md to ~/.claude/ on master commits/merges."
     },
     "orchestration": {
       "orchestrator": ["orchestrator.py"],
@@ -262,6 +268,21 @@
       "outputs": ["tasks/{slug}/{node-id}/CONTEXT.md", "YAML signal (done|blocked|error)"],
       "invokedBy": ["orchestrator.py (DiscoveryHandler)"],
       "modes": ["simple (quick approach assessment)", "complex (investigation + debate)"]
+    },
+    ".claude/agents/execution-agent.md": {
+      "uses": ["YAML handoff from /execute orchestrator", ".ai/PATTERNS.md", ".ai/FILES.json"],
+      "inputs": ["parent_task (id, title, complexity, verify)", "subtasks[]", "STATE.md", "EXPLORE_CONTEXT"],
+      "outputs": ["Implemented code", "Updated STATE.md with task results"],
+      "invokedBy": [".claude/commands/execute.md (spawned per parent task)"],
+      "_note": "Fresh-context agent: receives all needed context via YAML handoff, no context debt"
+    },
+    "scripts/sync-to-root.sh": {
+      "purpose": "Sync fat-controller .claude/ content to ~/.claude/ for server-wide use",
+      "syncs": [".claude/commands/*.md", ".claude/agents/*.md", ".claude/skills/*.md"],
+      "to": ["~/.claude/commands/", "~/.claude/agents/", "~/.claude/skills/"],
+      "behavior": "Additive only — does not delete destination files not in source",
+      "invokedBy": [".git/hooks/post-commit", ".git/hooks/post-merge"],
+      "flags": ["--dry-run"]
     },
     ".claude/agents/prompt-architect.md": {
       "uses": ["~/.claude/VALUES.md"],

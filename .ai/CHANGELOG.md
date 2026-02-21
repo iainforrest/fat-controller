@@ -9,6 +9,23 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- `scripts/sync-to-root.sh`: copies `.claude/{commands,agents,skills}/*.md` to `~/.claude/` (additive, non-destructive)
+- `.git/hooks/post-commit` and `.git/hooks/post-merge`: auto-trigger sync on master branch commits and merges
+- `execution-agent.md` added to fat-controller `.claude/agents/` (was missing, previously only at projects-level)
+- Dev-to-production sync architecture pattern in ARCHITECTURE.json
+
+### Changed
+- `.claude/` sync architecture simplified from three-tier to two-tier: fat-controller dev → `~/.claude/` production via git hook
+- Removed `~/projects/.claude/` intermediate layer
+- Moved `~/projects/.claude/skills/entities/` to `~/.claude/skills/entities/`
+
+### Removed
+- `~/projects/.claude/` directory (intermediate layer no longer needed)
+- Symlinks from 10 downstream projects (now resolved via direct root sync)
+
+---
+
+### Added (previous)
 - Project-scoped task directories: all orchestrator task paths now under `tasks/{slug}/` for multi-project isolation
 - `--project slug` CLI argument to orchestrator.py; auto-detected when single `tasks/*/OUTCOMES.md` found
 - `_project_tasks_dir(project_dir, slug)` helper as single path-resolution function in orchestrator.py

@@ -1,7 +1,7 @@
 {
   "meta": {
     "projectName": "fat-controller",
-    "version": "4.1.0",
+    "version": "4.2.0",
     "lastUpdated": "2026-02-21",
     "description": "Architecture patterns, data flows, and component relationships"
   },
@@ -251,6 +251,22 @@
         "State files (PROJECT_STATE.md, DECISIONS.md) provide audit trail"
       ]
     },
+    "devToProductionSync": {
+      "description": "Two-tier sync architecture: fat-controller dev directory is the authoritative source for all .claude/ content. Git hooks on master automatically push commands, agents, and skills to ~/.claude/ (production). Eliminates the projects-level intermediate layer.",
+      "keyFiles": ["scripts/sync-to-root.sh", ".git/hooks/post-commit", ".git/hooks/post-merge"],
+      "constraints": [
+        "Sync is additive only (no deletion of destination files not in source)",
+        "Only top-level *.md files synced (subdirectories like entities/ preserved in root)",
+        "Hook triggers on master branch commits and merges only",
+        "Git hooks live in .git/hooks/ (not tracked by git, must be set up manually after clone)"
+      ],
+      "benefits": [
+        "Two-tier simplicity: fat-controller dev → ~/.claude/ production (no intermediate layer)",
+        "Automatic: every master commit triggers sync without manual intervention",
+        "Non-destructive: root-only content (entities/, review-setup/) preserved",
+        "Dry-run mode: sync-to-root.sh --dry-run shows changes without applying"
+      ]
+    },
     "_example": {
       "description": "Example: How services/managers are structured",
       "keyFiles": ["services/ExampleService.ext"],
@@ -278,6 +294,26 @@
   },
   "dataFlows": {
     "_comment": "Map how data moves through your system",
+    "devToProductionSyncFlow": {
+      "name": "Dev-to-production sync via git hooks",
+      "steps": [
+        "Developer edits .claude/{commands,agents,skills}/*.md in fat-controller",
+        "git commit on master branch triggers post-commit hook",
+        "Hook calls scripts/sync-to-root.sh",
+        "Script compares source and destination files (diff -q)",
+        "NEW files: copied to ~/.claude/{commands,agents,skills}/",
+        "UPDATED files (changed content): overwritten at destination",
+        "UNCHANGED files: skipped",
+        "Subdirectories at destination (entities/, review-setup/) left untouched",
+        "git pull/merge on master triggers post-merge hook (same flow)"
+      ],
+      "keyFiles": [
+        "scripts/sync-to-root.sh",
+        ".git/hooks/post-commit",
+        ".git/hooks/post-merge"
+      ],
+      "dataModel": "fat-controller .claude/ → diff → ~/.claude/ (additive, non-destructive)"
+    },
     "memoryUpdateFlow": {
       "name": "Memory system update workflow",
       "steps": [

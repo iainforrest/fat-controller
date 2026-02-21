@@ -237,6 +237,49 @@ When you discover a new operational procedure, add it here using this format:
 
 ---
 
+## Dev-to-Production Sync
+
+### Automatic Sync (via git hook)
+
+Every commit or merge on master triggers the sync automatically:
+```bash
+git commit -m "feat: update execute command"
+# Post-commit hook runs scripts/sync-to-root.sh automatically
+```
+
+### Manual Sync
+```bash
+# Dry run — see what would change without applying
+/home/iain/projects/fat-controller/scripts/sync-to-root.sh --dry-run
+
+# Apply sync
+/home/iain/projects/fat-controller/scripts/sync-to-root.sh
+```
+
+### What Gets Synced
+- `.claude/commands/*.md` → `~/.claude/commands/`
+- `.claude/agents/*.md` → `~/.claude/agents/`
+- `.claude/skills/*.md` → `~/.claude/skills/`
+- Subdirectories (e.g., `entities/`, `review-setup/`) at destination are NOT touched
+
+### Verify Sync
+```bash
+# Check if agent exists at root
+ls ~/.claude/agents/ | grep execution-agent
+
+# Diff a specific file
+diff /home/iain/projects/fat-controller/.claude/commands/execute.md ~/.claude/commands/execute.md
+```
+
+### Re-install Hooks (after fresh clone)
+```bash
+cp /home/iain/projects/fat-controller/scripts/sync-to-root.sh /home/iain/projects/fat-controller/.git/hooks/
+# Or: hooks are already in .git/hooks/ if you cloned from the live repo
+ls /home/iain/projects/fat-controller/.git/hooks/post-commit  # verify
+```
+
+---
+
 ## Orchestrator Operations
 
 ### Running the Orchestrator

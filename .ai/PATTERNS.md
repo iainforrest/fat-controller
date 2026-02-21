@@ -60,6 +60,7 @@ Find the right pattern for your task:
 | Discovery before implementation | Discovery Node Pattern | (below) |
 | Quality gate with retry | Goal Gate Convergence Pattern | (below) |
 | Outcome-to-delivery | Project Lead Orchestration Pattern | (below) |
+| Dev-to-production .claude/ sync | Dev-to-Production Sync Pattern | See ARCHITECTURE.json devToProductionSync |
 
 *Table expands as you add patterns. Update when adding new domain files.*
 

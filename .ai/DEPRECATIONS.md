@@ -27,6 +27,40 @@ This file tracks:
 
 ---
 
+## Removed Patterns
+
+### Three-Tier .claude/ Layout (projects-level intermediate layer)
+
+**Status**: Removed
+
+**Deprecated Date**: 2026-02-21
+
+**Removal Date**: 2026-02-21
+
+**Reason**: The intermediate `~/projects/.claude/` layer added complexity with no benefit. Symlinks across 10 projects were fragile and hard to audit. Consolidated to a two-tier system: fat-controller dev → `~/.claude/` production via git hook.
+
+**Old Pattern**:
+```
+fat-controller .claude/  →  ~/projects/.claude/  →  ~/.claude/
+(symlinks)                   (manual sync)
+```
+
+**New Pattern**:
+```
+fat-controller .claude/  →  ~/.claude/
+(scripts/sync-to-root.sh via git post-commit/post-merge hook)
+```
+
+**Migration**:
+- `~/projects/.claude/` directory removed
+- Symlinks removed from 10 downstream projects
+- `~/projects/.claude/skills/entities/` moved to `~/.claude/skills/entities/`
+- `execution-agent.md` added directly to fat-controller `.claude/agents/`
+
+**Reference**: Commit `8367785 feat: Add dev-to-production sync for .claude/ files`
+
+---
+
 ## Deprecated APIs
 
 ### [API Name or Module]
